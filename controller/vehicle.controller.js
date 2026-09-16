@@ -5,7 +5,6 @@ import { Vehicle } from "../model/vehicle.model.js";
 import catchAsync from "../utils/catch.Async.js";
 import { uploadOnCloudinary } from "../utils/common.Method.js";
 import sendResponse from "../utils/sendResponse.js";
-import axios from "axios";
 
 const parseBoolean = (value) => {
   if (typeof value === "boolean") return value;
@@ -27,36 +26,6 @@ const getVehicleImageFile = (req) => {
     req.file ||
     null
   );
-};
-
-const validateVehicleRegistration = async (registrationNo) => {
-  const apiKey = process.env.DVLA_API_KEY;
-  if (!apiKey) {
-    console.warn("DVLA validation skipped: DVLA_API_KEY is not configured");
-    return;
-  }
-
-  try {
-    await axios.post(
-      "https://driver-vehicle-licensing.api.gov.uk/vehicle-enquiry/v1/vehicles",
-      {
-        registrationNumber: registrationNo,
-      },
-      {
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": apiKey,
-        },
-        timeout: 5000,
-      }
-    );
-  } catch (err) {
-    console.warn("Vehicle DVLA validation skipped after failed lookup", {
-      registrationNo,
-      status: err.response?.status,
-      error: err.response?.data,
-    });
-  }
 };
 
 export const getMyVehicles = catchAsync(async (req, res) => {
@@ -121,8 +90,6 @@ export const addVehicle = catchAsync(async (req, res) => {
     const uploadedImage = await uploadOnCloudinary(vehicleImageFile.path, "vehicles");
     uploadedImageUrl = uploadedImage?.secure_url || null;
   }
-
-  await validateVehicleRegistration(normalizedRegistrationNo);
 
   try {
     const hasExistingVehicle = await Vehicle.exists({ user: userId });

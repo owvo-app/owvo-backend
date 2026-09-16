@@ -17,12 +17,12 @@ const vehicleSchema = new mongoose.Schema(
     make: {
       type: String,
       required: true,
-      trim: true, 
+      trim: true,
     },
     model: {
       type: String,
       required: true,
-      trim: true, 
+      trim: true,
     },
     year: {
       type: Number,
@@ -33,7 +33,14 @@ const vehicleSchema = new mongoose.Schema(
     size: {
       type: String,
       required: true,
-      enum: ["Small Car", "Medium Car", "Large Car", "Small Van", "Motorbike", "Jeep"],
+      enum: [
+        "Small Car",
+        "Medium Car",
+        "Large Car",
+        "Small Van",
+        "Motorbike",
+        "Jeep",
+      ],
     },
     image: {
       type: String,
@@ -44,6 +51,21 @@ const vehicleSchema = new mongoose.Schema(
       default: false,
       index: true,
     },
+    source: {
+      type: String,
+      enum: ["manual", "dvla"],
+      default: "manual",
+    },
+    colour: { type: String, default: null, trim: true },
+    fuelType: { type: String, default: null, trim: true },
+    engineCapacity: { type: Number, default: null },
+    co2Emissions: { type: Number, default: null },
+    typeApproval: { type: String, default: null, trim: true },
+    taxStatus: { type: String, default: null, trim: true },
+    taxDueDate: { type: String, default: null, trim: true },
+    motStatus: { type: String, default: null, trim: true },
+    motExpiryDate: { type: String, default: null, trim: true },
+    dvlaVerifiedAt: { type: Date, default: null },
   },
   { timestamps: true }
 );

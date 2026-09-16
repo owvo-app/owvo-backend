@@ -7,12 +7,18 @@ import {
   setDefaultVehicle,
   updateVehicle,
 } from "../controller/vehicle.controller.js";
+import {
+  addDvlaVehicle,
+  lookupVehicleByRegistration,
+} from "../controller/dvlaVehicle.controller.js";
 import { protect } from "../middleware/auth.middleware.js";
 import { upload } from "../middleware/upload.middleware.js";
 
 const router = express.Router();
 
 router.get("/", protect, getMyVehicles);
+router.post("/lookup", protect, lookupVehicleByRegistration);
+router.post("/dvla", protect, addDvlaVehicle);
 router.post(
   "/",
   protect,
