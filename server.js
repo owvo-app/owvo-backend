@@ -11,7 +11,10 @@ import notFound from "./middleware/notFound.js";
 import { initSocket } from "./socket/socket.js";
 import { ensureUserIndexes } from "./utils/userIndexes.util.js";
 import { corsOriginDelegate } from "./utils/allowedOrigins.util.js";
+import { validateAuthConfiguration } from "./utils/authToken.js";
 
+
+validateAuthConfiguration();
 
 const app = express();
 
@@ -48,7 +51,11 @@ app.get("/", (req, res) => {
 });
 
 app.get("/health", (req, res) => {
-  res.status(200).json({ success: true, message: "OK" });
+  const databaseReady = mongoose.connection.readyState === 1;
+  res.status(databaseReady ? 200 : 503).json({
+    success: databaseReady,
+    message: databaseReady ? "OK" : "Database connection is not ready",
+  });
 });
 
 app.use("/api/v1", router);
@@ -57,15 +64,20 @@ app.use(notFound);
 
 const PORT = process.env.PORT || 5000;
 const HOST = process.env.HOST || "0.0.0.0";
-server.listen(PORT, HOST, async () => {
-  console.log(`Server is running at http://${HOST}:${PORT}`);
 
+const startServer = async () => {
   try {
     await mongoose.connect(process.env.MONGO_DB_URL);
     await ensureUserIndexes();
     console.log("MongoDB connected");
+
+    server.listen(PORT, HOST, () => {
+      console.log(`Server is running at http://${HOST}:${PORT}`);
+    });
   } catch (err) {
     console.error("MongoDB connection error:", err);
     process.exit(1);
   }
-});
+};
+
+startServer();

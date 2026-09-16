@@ -1,6 +1,11 @@
 import httpStatus from "http-status";
 import AppError from "../errors/AppError.js";
-import { createToken, verifyToken } from "../utils/authToken.js";
+import {
+  createToken,
+  getAccessTokenExpiresIn,
+  getRefreshTokenExpiresIn,
+  verifyToken,
+} from "../utils/authToken.js";
 import catchAsync from "../utils/catch.Async.js";
 import { generateOTP } from "../utils/common.Method.js";
 import { recordActivity } from "../utils/activityLog.util.js";
@@ -107,7 +112,7 @@ export const register = catchAsync(async (req, res) => {
   const assignedRole = allowedRoles.includes(role) ? role : "user";
 
   
-  const user = await User.create({
+  const user = new User({
     email: normalizedEmail,
     password,
     role: assignedRole,
@@ -126,13 +131,13 @@ export const register = catchAsync(async (req, res) => {
   const accessToken = createToken(
     jwtPayload,
     process.env.JWT_ACCESS_SECRET,
-    process.env.JWT_ACCESS_EXPIRES_IN
+    getAccessTokenExpiresIn()
   );
 
   const refreshToken = createToken(
     jwtPayload,
     process.env.JWT_REFRESH_SECRET,
-    process.env.JWT_REFRESH_EXPIRES_IN
+    getRefreshTokenExpiresIn()
   );
 
   user.refreshToken = refreshToken;
@@ -207,13 +212,13 @@ export const login = catchAsync(async (req, res) => {
   const accessToken = createToken(
     jwtPayload,
     process.env.JWT_ACCESS_SECRET,
-    process.env.JWT_ACCESS_EXPIRES_IN
+    getAccessTokenExpiresIn()
   );
 
   const refreshToken = createToken(
     jwtPayload,
     process.env.JWT_REFRESH_SECRET,
-    process.env.JWT_REFRESH_EXPIRES_IN
+    getRefreshTokenExpiresIn()
   );
 
   user.refreshToken = refreshToken;
@@ -399,13 +404,13 @@ export const refreshToken = catchAsync(async (req, res) => {
   const accessToken = createToken(
     jwtPayload,
     process.env.JWT_ACCESS_SECRET,
-    process.env.JWT_ACCESS_EXPIRES_IN
+    getAccessTokenExpiresIn()
   );
 
   const refreshToken1 = createToken(
     jwtPayload,
     process.env.JWT_REFRESH_SECRET,
-    process.env.JWT_REFRESH_EXPIRES_IN
+    getRefreshTokenExpiresIn()
   );
   user.refreshToken = refreshToken1;
   await user.save();
