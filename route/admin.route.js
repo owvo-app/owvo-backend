@@ -27,6 +27,8 @@ import {
   getUpcomingBookings,
   getAllUsers,
   getAllProviders,
+  getProviderAcceptanceHistory,
+  resetProviderPolicyAcceptance,
   changeUserRole,
   deleteUser,
   updateAdminBookingStatus,
@@ -102,5 +104,17 @@ router.patch("/users/:userId/status", protect, isAdmin, updateUserAccountStatus)
 router.patch("/users/:userId/role", protect, isAdmin, changeUserRole);
 router.delete("/users/:userId", protect, isAdmin, deleteUser);
 router.get("/providers", protect, hasDashboardMenu("washers"), getAllProviders);
+router.get(
+  "/providers/:id/acceptance-history",
+  protect,
+  hasDashboardMenu("washers"),
+  getProviderAcceptanceHistory
+);
+router.patch(
+  "/providers/:id/policy-acceptance/reset",
+  protect,
+  hasDashboardMenu("washers"),
+  resetProviderPolicyAcceptance
+);
 
 export default router;

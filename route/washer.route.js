@@ -19,6 +19,7 @@ import {
   goOffline,
   goOnline,
   removePreferredService,
+  submitTrainingCompletion,
   // ─── Location ─────────────────────────────────────────────────────────────
   updateWasherLocation,
   updateWasherAvailability,
@@ -41,6 +42,7 @@ router.get("/nearby", protect, getNearbyWashers);
 router.get("/status", protect, getWasherStatus);
 router.get("/policies", protect, getWasherPolicyStatus);
 router.post("/policies/accept", protect, acceptWasherPolicies);
+router.post("/training/complete", protect, submitTrainingCompletion);
 router.get("/availability", protect, getWasherAvailability);
 router.put("/availability", protect, updateWasherAvailability);
 router.post("/online", protect, goOnline);

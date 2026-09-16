@@ -18,6 +18,7 @@ import { AdminWithdrawal } from "../model/adminWithdrawal.model.js";
 import { Service } from "../model/service.model.js";
 import { Rating } from "../model/rating.model.js";
 import { UserRating } from "../model/userRating.model.js";
+import ProviderAcceptance from "../model/providerAcceptance.model.js";
 import { emitToUser, broadcast } from "../socket/socket.js";
 import { refreshProviderBusyState } from "../utils/providerBusy.util.js";
 import {
@@ -2374,3 +2375,94 @@ export const updateDashboardSettings = catchAsync(async (req, res) => {
 });
 
 
+
+/**
+ * GET /admin/providers/:id/acceptance-history
+ * Provider ki poori acceptance/training history — Safety Guidelines,
+ * Washer Agreement, aur har training module, tareekh/waqt/device ke sath.
+ */
+export const getProviderAcceptanceHistory = catchAsync(async (req, res) => {
+  const { id } = req.params;
+
+  const provider = await User.findOne({ _id: id, role: "provider" }).select(
+    "name email policyAcceptance"
+  );
+
+  if (!provider) {
+    throw new AppError(httpStatus.NOT_FOUND, "Provider not found");
+  }
+
+  const history = await ProviderAcceptance.find({ provider: id })
+    .sort({ createdAt: -1 })
+    .lean();
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Acceptance history fetched",
+    data: {
+      provider: { _id: provider._id, name: provider.name, email: provider.email },
+      currentStatus: provider.policyAcceptance,
+      history,
+    },
+  });
+});
+
+/**
+ * PATCH /admin/providers/:id/policy-acceptance/reset
+ * Body: { types?: ["safety_guidelines", "washer_agreement"] }
+ * Admin provider ko dobara accept karwana chahta hai (jaise rules badal
+ * gaye hon). Bas flag false kar dete hain — app ka maujooda gating
+ * (hasAcceptedWasherPolicies / ensureWasherPoliciesAccepted) khud provider
+ * ko agli baar Go Online karte waqt screen dikha dega.
+ */
+export const resetProviderPolicyAcceptance = catchAsync(async (req, res) => {
+  const { id } = req.params;
+  const requestedTypes = Array.isArray(req.body?.types) ? req.body.types : null;
+
+  const provider = await User.findOne({ _id: id, role: "provider" });
+
+  if (!provider) {
+    throw new AppError(httpStatus.NOT_FOUND, "Provider not found");
+  }
+
+  provider.policyAcceptance = provider.policyAcceptance || {};
+
+  const resetSafety =
+    !requestedTypes || requestedTypes.includes("safety_guidelines");
+  const resetAgreement =
+    !requestedTypes || requestedTypes.includes("washer_agreement");
+
+  if (resetSafety) {
+    provider.policyAcceptance.safetyGuidelinesAccepted = false;
+    provider.policyAcceptance.safetyGuidelinesAcceptedAt = null;
+  }
+  if (resetAgreement) {
+    provider.policyAcceptance.washerAgreementAccepted = false;
+    provider.policyAcceptance.washerAgreementAcceptedAt = null;
+  }
+
+  // Agar provider abhi online hai, usay bhi offline kar do — warna wo
+  // policies dobara accept kiye baghair hi online reh jayega.
+  provider.isOnline = false;
+  provider.isBusy = false;
+
+  await provider.save();
+
+  await recordActivity({
+    req,
+    action: "provider.policy_acceptance.reset",
+    entityType: "user",
+    entityId: provider._id,
+    metadata: { resetSafety, resetAgreement },
+  });
+
+  broadcast("admin_provider_updated", { providerId: provider._id.toString() });
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Provider will be asked to re-accept the selected policies",
+    data: { policyAcceptance: provider.policyAcceptance },
+  });
+});

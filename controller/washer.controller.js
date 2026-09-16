@@ -6,6 +6,7 @@ import { paymentInfo } from "../model/payment.model.js";
 import { Rating } from "../model/rating.model.js";
 import { Service } from "../model/service.model.js";
 import { User } from "../model/user.model.js";
+import ProviderAcceptance from "../model/providerAcceptance.model.js";
 import { WashHistory } from "../model/WashHistory.model.js";
 import { broadcast, emitToUser } from "../socket/socket.js";
 import {
@@ -26,6 +27,19 @@ import {
 import sendResponse from "../utils/sendResponse.js";
 
 const WASHER_POLICY_VERSION = "2026-06-03";
+
+/**
+ * Render (aur aksar reverse proxies) ke peeche req.ip proxy ka IP deta hai,
+ * asal client ka nahi. X-Forwarded-For header mein asal IP hota hai (jo
+ * multiple proxies ho to comma se separated list ka pehla wala).
+ */
+const getRequestIp = (req) => {
+  const forwarded = req.headers["x-forwarded-for"];
+  if (forwarded) {
+    return forwarded.split(",")[0].trim();
+  }
+  return req.socket?.remoteAddress || req.ip || "";
+};
 
 const approximateLocation = (location) => {
   const coordinates = location?.coordinates;
@@ -203,23 +217,61 @@ export const acceptWasherPolicies = catchAsync(async (req, res) => {
     throw new AppError(httpStatus.NOT_FOUND, "Washer not found");
   }
 
-  const { safetyGuidelinesAccepted, washerAgreementAccepted } = req.body || {};
+  const {
+    safetyGuidelinesAccepted,
+    washerAgreementAccepted,
+    device,
+    appVersion,
+  } = req.body || {};
   const now = new Date();
+  const ipAddress = getRequestIp(req);
 
   washer.policyAcceptance = washer.policyAcceptance || {};
   washer.policyAcceptance.version = WASHER_POLICY_VERSION;
 
+  // Har acceptance ka ek alag audit record banate hain, taake purani
+  // history bhi mehfooz rahe (sirf abhi ka status nahi).
+  const auditEntries = [];
+
   if (safetyGuidelinesAccepted === true) {
     washer.policyAcceptance.safetyGuidelinesAccepted = true;
     washer.policyAcceptance.safetyGuidelinesAcceptedAt = now;
+    auditEntries.push({
+      provider: washer._id,
+      type: "safety_guidelines",
+      version: WASHER_POLICY_VERSION,
+      acceptedAt: now,
+      device: device || "",
+      appVersion: appVersion || "",
+      ipAddress,
+    });
   }
 
   if (washerAgreementAccepted === true) {
     washer.policyAcceptance.washerAgreementAccepted = true;
     washer.policyAcceptance.washerAgreementAcceptedAt = now;
+    auditEntries.push({
+      provider: washer._id,
+      type: "washer_agreement",
+      version: WASHER_POLICY_VERSION,
+      acceptedAt: now,
+      device: device || "",
+      appVersion: appVersion || "",
+      ipAddress,
+    });
   }
 
   await washer.save();
+
+  if (auditEntries.length > 0) {
+    // Audit trail save na ho paye to bhi acceptance khud fail nahi honi
+    // chahiye — is liye alag try/catch mein rakha hai.
+    try {
+      await ProviderAcceptance.insertMany(auditEntries);
+    } catch (err) {
+      console.error("Failed to write acceptance audit log:", err);
+    }
+  }
 
   sendResponse(res, {
     statusCode: httpStatus.OK,
@@ -229,6 +281,46 @@ export const acceptWasherPolicies = catchAsync(async (req, res) => {
       policyAcceptance: washer.policyAcceptance,
       allAccepted: hasAcceptedWasherPolicies(washer),
     },
+  });
+});
+
+/**
+ * POST /washers/training/complete
+ * Body: { moduleId, percentWatched, device, appVersion }
+ * Provider Academy mein ek module poora dekhne par Flutter isay call
+ * karta hai (TrainingProgressService.syncToServer).
+ */
+export const submitTrainingCompletion = catchAsync(async (req, res) => {
+  if (req.user?.role !== "provider") {
+    throw new AppError(
+      httpStatus.FORBIDDEN,
+      "Only providers can submit training completion"
+    );
+  }
+
+  const { moduleId, percentWatched, device, appVersion } = req.body || {};
+
+  if (!moduleId || typeof moduleId !== "string") {
+    throw new AppError(httpStatus.BAD_REQUEST, "moduleId is required");
+  }
+
+  const record = await ProviderAcceptance.create({
+    provider: req.user._id,
+    type: "training_module",
+    moduleId,
+    percentWatched:
+      typeof percentWatched === "number" ? percentWatched : 100,
+    acceptedAt: new Date(),
+    device: device || "",
+    appVersion: appVersion || "",
+    ipAddress: getRequestIp(req),
+  });
+
+  sendResponse(res, {
+    statusCode: httpStatus.CREATED,
+    success: true,
+    message: "Training completion recorded",
+    data: record,
   });
 });
 
@@ -1342,5 +1434,3 @@ export const getWeeklyIncomeProvider = catchAsync(async (req, res) => {
     },
   });
 });
-
-
