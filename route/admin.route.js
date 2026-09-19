@@ -29,6 +29,17 @@ import {
   getAllProviders,
   getProviderAcceptanceHistory,
   resetProviderPolicyAcceptance,
+  getAllTrainingModules,
+  createTrainingModule,
+  updateTrainingModule,
+  replaceTrainingModuleVideo,
+  reorderTrainingModules,
+  deactivateTrainingModule,
+  getTrainingCompletionOverview,
+  resetProviderTraining,
+  updateProviderVerificationDetails,
+  getExpiringInsurance,
+  sendVerificationReminder,
   changeUserRole,
   deleteUser,
   updateAdminBookingStatus,
@@ -45,6 +56,7 @@ import {
   updateUserAccountStatus,
 } from "../controller/admin.controller.js";
 import { protect, isAdmin, isDashboardUser, hasDashboardMenu } from "../middleware/auth.middleware.js";
+import { uploadVideo } from "../middleware/uploadVideo.middleware.js";
 import {
   getAdminDataRequests,
   updateAdminDataRequest,
@@ -115,6 +127,78 @@ router.patch(
   protect,
   hasDashboardMenu("washers"),
   resetProviderPolicyAcceptance
+);
+
+// ─── Training Modules (Provider Academy) ──────────────────────────────────
+router.get(
+  "/training-modules",
+  protect,
+  hasDashboardMenu("washers"),
+  getAllTrainingModules
+);
+router.post(
+  "/training-modules",
+  protect,
+  hasDashboardMenu("washers"),
+  uploadVideo.single("video"),
+  createTrainingModule
+);
+router.patch(
+  "/training-modules/reorder",
+  protect,
+  hasDashboardMenu("washers"),
+  reorderTrainingModules
+);
+router.get(
+  "/training-modules/completion-overview",
+  protect,
+  hasDashboardMenu("washers"),
+  getTrainingCompletionOverview
+);
+router.patch(
+  "/training-modules/:id",
+  protect,
+  hasDashboardMenu("washers"),
+  updateTrainingModule
+);
+router.patch(
+  "/training-modules/:id/replace-video",
+  protect,
+  hasDashboardMenu("washers"),
+  uploadVideo.single("video"),
+  replaceTrainingModuleVideo
+);
+router.delete(
+  "/training-modules/:id",
+  protect,
+  hasDashboardMenu("washers"),
+  deactivateTrainingModule
+);
+router.patch(
+  "/providers/:id/training/reset",
+  protect,
+  hasDashboardMenu("washers"),
+  resetProviderTraining
+);
+
+// ─── Provider Verification — extra fields ─────────────────────────────────
+router.patch(
+  "/providers/:id/verification-details",
+  protect,
+  hasDashboardMenu("washers"),
+  updateProviderVerificationDetails
+);
+router.get(
+  "/providers/insurance-expiring",
+  protect,
+  hasDashboardMenu("washers"),
+  getExpiringInsurance
+);
+router.post(
+  "/providers/:id/send-verification-reminder",
+  protect,
+  hasDashboardMenu("washers"),
+  sendVerificationReminder
 );
 
 export default router;

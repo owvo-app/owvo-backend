@@ -258,6 +258,8 @@ export const updateProfile = catchAsync(async (req, res) => {
     noRoadPayment,
     oneCarSpaceOnly,
     notSharedOrCommunal,
+    isSafeWorkingArea,
+    isResidentialAreaSuitable,
 
     accountHolderName,
     bankAddress,
@@ -359,6 +361,8 @@ export const updateProfile = catchAsync(async (req, res) => {
   if (noRoadPayment !== undefined) user.drivewayEligibility.noRoadPayment = parseBoolean(noRoadPayment);
   if (oneCarSpaceOnly !== undefined) user.drivewayEligibility.oneCarSpaceOnly = parseBoolean(oneCarSpaceOnly);
   if (notSharedOrCommunal !== undefined) user.drivewayEligibility.notSharedOrCommunal = parseBoolean(notSharedOrCommunal);
+  if (isSafeWorkingArea !== undefined) user.drivewayEligibility.isSafeWorkingArea = parseBoolean(isSafeWorkingArea);
+  if (isResidentialAreaSuitable !== undefined) user.drivewayEligibility.isResidentialAreaSuitable = parseBoolean(isResidentialAreaSuitable);
 
   // ---------------------------
   // Bank details
@@ -961,12 +965,3 @@ export const getUserActivity = catchAsync(async (req, res) => {
     },
   });
 });
-
-
-
-
-
-
-
-
-

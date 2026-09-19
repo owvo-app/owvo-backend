@@ -19,6 +19,9 @@ import { Service } from "../model/service.model.js";
 import { Rating } from "../model/rating.model.js";
 import { UserRating } from "../model/userRating.model.js";
 import ProviderAcceptance from "../model/providerAcceptance.model.js";
+import { TrainingModule } from "../model/trainingModule.model.js";
+import { Notification } from "../model/notification.model.js";
+import { uploadOnCloudinary } from "../utils/common.Method.js";
 import { emitToUser, broadcast } from "../socket/socket.js";
 import { refreshProviderBusyState } from "../utils/providerBusy.util.js";
 import {
@@ -1016,12 +1019,20 @@ export const updateProviderVerification = catchAsync(async (req, res) => {
 
   await provider.save();
 
+  const missingDocuments =
+    status === "rejected" ? findMissingDocuments(provider) : [];
+  const missingDocsText =
+    missingDocuments.length > 0
+      ? ` Still missing: ${missingDocuments.join(", ")}.`
+      : "";
+
   const verificationMessage =
     status === "approved"
       ? "Your OWVO provider verification has been approved. You can now go online."
       : status === "rejected"
-        ? provider.adminVerification.rejectionReason ||
-          "Your OWVO provider verification was rejected. Please update your documents or contact support."
+        ? (provider.adminVerification.rejectionReason ||
+            "Your OWVO provider verification was rejected. Please update your documents or contact support.") +
+          missingDocsText
         : "Your OWVO provider verification is under review.";
 
   emitToUser(provider._id.toString(), "provider_verification_update", {
@@ -1029,16 +1040,36 @@ export const updateProviderVerification = catchAsync(async (req, res) => {
     status,
     message: verificationMessage,
     rejectionReason: provider.adminVerification.rejectionReason,
+    missingDocuments,
     notes: provider.adminVerification.notes,
     reviewedAt: provider.adminVerification.reviewedAt,
   });
+
+  // Turant (live) socket event sirf tab kaam karta hai jab provider us
+  // waqt app mein ho. Isay bhi save kar dete hain taake agar wo offline
+  // ho, agli baar app kholte hi Inbox mein dikh jaye — Reminder wale
+  // Notification system ko hi reuse kar rahe hain.
+  if (status === "approved" || status === "rejected") {
+    try {
+      await Notification.create({
+        recipient: provider._id,
+        type: "general",
+        title: status === "approved" ? "Verification approved" : "Verification rejected",
+        message: verificationMessage,
+        sentBy: req.user._id,
+        metadata: { verificationStatus: status, missingDocuments },
+      });
+    } catch (err) {
+      console.error("Failed to save verification notification:", err);
+    }
+  }
 
   await recordActivity({
     req,
     action: "provider.verification_updated",
     entityType: "user",
     entityId: provider._id,
-    metadata: { status, rejectionReason, notes },
+    metadata: { status, rejectionReason, notes, missingDocuments },
   });
 
   sendResponse(res, {
@@ -1866,7 +1897,14 @@ export const getAdminPayouts = catchAsync(async (req, res) => {
       netAmount,
       paidOut: payoutTotals.paidOut,
       pendingOut: payoutTotals.pendingOut,
-      payableAmount: asMoney(Math.max(netAmount - payoutTotals.paidOut, 0)),
+      // Pending/processing payouts ko bhi minus karte hain — warna admin
+      // ek aisa paisa "payable" dekh sakta hai jo pehle se kisi payout
+      // mein queue ho chuka hai, aur galti se dobara pay kar sakta hai.
+      // Provider ke apne wallet (/washers/wallet/summary) mein bhi yehi
+      // hisaab hai — dono hamesha match karenge.
+      payableAmount: asMoney(
+        Math.max(netAmount - payoutTotals.paidOut - payoutTotals.pendingOut, 0)
+      ),
     };
   });
 
@@ -1943,11 +1981,14 @@ export const createAdminPayout = catchAsync(async (req, res) => {
       { $match: { provider: provider._id, status: "completed" } },
       { $group: { _id: null, total: { $sum: "$finalPrice" } } },
     ]),
+    // "paid" aur "pending"/"processing" dono ginte hain — warna admin
+    // ek hi paisa do payouts mein bhej sakta hai (pehla abhi queue mein
+    // hai, dusra usi balance ko phir se "available" samajh kar ban jaye).
     Payout.aggregate([
       {
         $match: {
           provider: provider._id,
-          status: "paid",
+          status: { $in: ["paid", "pending", "processing"] },
         },
       },
       { $group: { _id: null, total: { $sum: "$amount" } } },
@@ -1961,7 +2002,7 @@ export const createAdminPayout = catchAsync(async (req, res) => {
   if (payoutAmount > payableAmount) {
     throw new AppError(
       httpStatus.BAD_REQUEST,
-      `Payout exceeds provider available 75% earnings balance (${payoutCurrency} ${payableAmount.toFixed(2)})`
+      `Payout exceeds provider's available balance (${payoutCurrency} ${payableAmount.toFixed(2)}). This already accounts for any pending payouts.`
     );
   }
 
@@ -2385,15 +2426,34 @@ export const getProviderAcceptanceHistory = catchAsync(async (req, res) => {
   const { id } = req.params;
 
   const provider = await User.findOne({ _id: id, role: "provider" }).select(
-    "name email policyAcceptance"
+    "name email policyAcceptance nationalInsuranceStatus publicLiabilityInsurance drivewayEligibility adminVerification"
   );
 
   if (!provider) {
     throw new AppError(httpStatus.NOT_FOUND, "Provider not found");
   }
 
-  const history = await ProviderAcceptance.find({ provider: id })
+  const acceptanceHistory = await ProviderAcceptance.find({ provider: id })
     .sort({ createdAt: -1 })
+    .lean();
+
+  // Admin ke saare verification-related actions (approve/reject, details
+  // update, training reset) pehle se ActivityLog mein save ho rahe the —
+  // yahan unhe isi provider ke liye jama kar ke ek poori timeline bana rahe
+  // hain, dobara log system banane ki zaroorat nahi.
+  const verificationActions = [
+    "provider.verification_updated",
+    "provider.verification_details_updated",
+    "provider.policy_acceptance.reset",
+    "provider.training.reset",
+  ];
+  const activityHistory = await ActivityLog.find({
+    entityType: "user",
+    entityId: id,
+    action: { $in: verificationActions },
+  })
+    .sort({ createdAt: -1 })
+    .populate("actor", "name email")
     .lean();
 
   sendResponse(res, {
@@ -2403,7 +2463,12 @@ export const getProviderAcceptanceHistory = catchAsync(async (req, res) => {
     data: {
       provider: { _id: provider._id, name: provider.name, email: provider.email },
       currentStatus: provider.policyAcceptance,
-      history,
+      nationalInsuranceStatus: provider.nationalInsuranceStatus,
+      publicLiabilityInsurance: provider.publicLiabilityInsurance,
+      drivewayEligibility: provider.drivewayEligibility,
+      adminVerification: provider.adminVerification,
+      history: acceptanceHistory,
+      activityHistory,
     },
   });
 });
@@ -2464,5 +2529,572 @@ export const resetProviderPolicyAcceptance = catchAsync(async (req, res) => {
     success: true,
     message: "Provider will be asked to re-accept the selected policies",
     data: { policyAcceptance: provider.policyAcceptance },
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════
+// TRAINING MODULES — Provider Academy content management
+// ════════════════════════════════════════════════════════════════════════
+
+/**
+ * GET /admin/training-modules
+ * Admin ki apni list — active aur inactive dono, order se.
+ */
+export const getAllTrainingModules = catchAsync(async (req, res) => {
+  const modules = await TrainingModule.find({}).sort({ order: 1 }).lean();
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Training modules fetched",
+    data: modules,
+  });
+});
+
+/**
+ * POST /admin/training-modules
+ * multipart/form-data: video (file), title, topics (JSON string array),
+ * isMandatory ("true"/"false")
+ * Naya module banata hai — video Cloudinary par jati hai.
+ */
+export const createTrainingModule = catchAsync(async (req, res) => {
+  const { title, topics, isMandatory } = req.body || {};
+
+  if (!title || typeof title !== "string") {
+    throw new AppError(httpStatus.BAD_REQUEST, "title is required");
+  }
+  if (!req.file) {
+    throw new AppError(httpStatus.BAD_REQUEST, "A video file is required");
+  }
+
+  let parsedTopics = [];
+  try {
+    parsedTopics = topics ? JSON.parse(topics) : [];
+    if (!Array.isArray(parsedTopics)) parsedTopics = [];
+  } catch {
+    // topics comma-separated bhi bheja ja sakta hai
+    parsedTopics = String(topics || "")
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean);
+  }
+
+  const uploaded = await uploadOnCloudinary(req.file.path, "training-videos", {
+    resourceType: "video",
+  });
+
+  if (!uploaded?.secure_url) {
+    throw new AppError(
+      httpStatus.INTERNAL_SERVER_ERROR,
+      "Video upload failed, please try again"
+    );
+  }
+
+  // Naya module hamesha list ke aakhir mein jata hai
+  const lastModule = await TrainingModule.findOne({}).sort({ order: -1 });
+  const nextOrder = lastModule ? lastModule.order + 1 : 0;
+
+  const module = await TrainingModule.create({
+    title,
+    topics: parsedTopics,
+    videoUrl: uploaded.secure_url,
+    cloudinaryPublicId: uploaded.public_id,
+    durationSeconds: uploaded.duration ? Math.round(uploaded.duration) : null,
+    order: nextOrder,
+    isMandatory: isMandatory !== "false",
+    createdBy: req.user?._id,
+  });
+
+  await recordActivity({
+    req,
+    action: "training_module.created",
+    entityType: "training_module",
+    entityId: module._id,
+    metadata: { title },
+  });
+
+  sendResponse(res, {
+    statusCode: httpStatus.CREATED,
+    success: true,
+    message: "Training module created",
+    data: module,
+  });
+});
+
+/**
+ * PATCH /admin/training-modules/:id
+ * Text fields update karta hai (title, topics, isMandatory, isActive).
+ * Video badalne ke liye alag endpoint (/replace-video) hai.
+ */
+export const updateTrainingModule = catchAsync(async (req, res) => {
+  const { id } = req.params;
+  const { title, topics, isMandatory, isActive } = req.body || {};
+
+  const module = await TrainingModule.findById(id);
+  if (!module) {
+    throw new AppError(httpStatus.NOT_FOUND, "Training module not found");
+  }
+
+  if (typeof title === "string" && title.trim()) module.title = title.trim();
+  if (Array.isArray(topics)) module.topics = topics;
+  if (typeof isMandatory === "boolean") module.isMandatory = isMandatory;
+  if (typeof isActive === "boolean") module.isActive = isActive;
+
+  await module.save();
+
+  await recordActivity({
+    req,
+    action: "training_module.updated",
+    entityType: "training_module",
+    entityId: module._id,
+    metadata: { title: module.title },
+  });
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Training module updated",
+    data: module,
+  });
+});
+
+/**
+ * PATCH /admin/training-modules/:id/replace-video
+ * multipart/form-data: video (file)
+ * Purani video Cloudinary se hata kar nayi laga deta hai — providers ko
+ * agli baar screen kholte hi nayi video dikhegi.
+ */
+export const replaceTrainingModuleVideo = catchAsync(async (req, res) => {
+  const { id } = req.params;
+
+  const module = await TrainingModule.findById(id);
+  if (!module) {
+    throw new AppError(httpStatus.NOT_FOUND, "Training module not found");
+  }
+  if (!req.file) {
+    throw new AppError(httpStatus.BAD_REQUEST, "A video file is required");
+  }
+
+  const uploaded = await uploadOnCloudinary(req.file.path, "training-videos", {
+    resourceType: "video",
+  });
+
+  if (!uploaded?.secure_url) {
+    throw new AppError(
+      httpStatus.INTERNAL_SERVER_ERROR,
+      "Video upload failed, please try again"
+    );
+  }
+
+  const oldPublicId = module.cloudinaryPublicId;
+
+  module.videoUrl = uploaded.secure_url;
+  module.cloudinaryPublicId = uploaded.public_id;
+  module.durationSeconds = uploaded.duration
+    ? Math.round(uploaded.duration)
+    : null;
+  await module.save();
+
+  // Purani video hatana — fail ho to bhi module save ho chuka hai, isliye
+  // silently ignore karte hain (orphaned Cloudinary file, bara masla nahi)
+  if (oldPublicId) {
+    try {
+      const { v2: cloudinary } = await import("cloudinary");
+      await cloudinary.uploader.destroy(oldPublicId, {
+        resource_type: "video",
+      });
+    } catch (err) {
+      console.error("Failed to delete old training video:", err);
+    }
+  }
+
+  await recordActivity({
+    req,
+    action: "training_module.video_replaced",
+    entityType: "training_module",
+    entityId: module._id,
+    metadata: { title: module.title },
+  });
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Video replaced",
+    data: module,
+  });
+});
+
+/**
+ * PATCH /admin/training-modules/reorder
+ * Body: { order: [moduleId1, moduleId2, ...] } — is tarteeb mein 0,1,2...
+ * assign ho jata hai.
+ */
+export const reorderTrainingModules = catchAsync(async (req, res) => {
+  const { order } = req.body || {};
+
+  if (!Array.isArray(order) || order.length === 0) {
+    throw new AppError(httpStatus.BAD_REQUEST, "order must be a non-empty array");
+  }
+
+  await Promise.all(
+    order.map((moduleId, index) =>
+      TrainingModule.updateOne({ _id: moduleId }, { $set: { order: index } })
+    )
+  );
+
+  const modules = await TrainingModule.find({}).sort({ order: 1 }).lean();
+
+  await recordActivity({
+    req,
+    action: "training_module.reordered",
+    entityType: "training_module",
+    entityId: null,
+    metadata: { order },
+  });
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Training modules reordered",
+    data: modules,
+  });
+});
+
+/**
+ * DELETE /admin/training-modules/:id
+ * Hard delete nahi karte — isActive false kar dete hain, taake purani
+ * completion history (ProviderAcceptance) apna matlab na khoye.
+ */
+export const deactivateTrainingModule = catchAsync(async (req, res) => {
+  const { id } = req.params;
+
+  const module = await TrainingModule.findByIdAndUpdate(
+    id,
+    { isActive: false },
+    { new: true }
+  );
+
+  if (!module) {
+    throw new AppError(httpStatus.NOT_FOUND, "Training module not found");
+  }
+
+  await recordActivity({
+    req,
+    action: "training_module.deactivated",
+    entityType: "training_module",
+    entityId: module._id,
+    metadata: { title: module.title },
+  });
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Training module removed",
+    data: module,
+  });
+});
+
+/**
+ * GET /admin/training-modules/completion-overview
+ * Har provider ne kaunse modules mukammal kiye — admin ke liye ek jagah.
+ */
+export const getTrainingCompletionOverview = catchAsync(async (req, res) => {
+  const modules = await TrainingModule.find({ isActive: true })
+    .sort({ order: 1 })
+    .select("_id title")
+    .lean();
+
+  const completions = await ProviderAcceptance.find({
+    type: "training_module",
+  })
+    .sort({ createdAt: -1 })
+    .populate("provider", "name email")
+    .lean();
+
+  // Har provider ke liye, kaunse module IDs complete hain (sabse pehla/
+  // sabse purana record kaafi hai — dobara complete karna dobara record
+  // banata hai, hum sirf "kabhi complete hua ya nahi" dekhte hain)
+  const byProvider = new Map();
+  for (const record of completions) {
+    if (!record.provider) continue;
+    const providerId = record.provider._id.toString();
+    if (!byProvider.has(providerId)) {
+      byProvider.set(providerId, {
+        provider: record.provider,
+        completedModuleIds: new Set(),
+        lastActivityAt: record.createdAt,
+      });
+    }
+    byProvider.get(providerId).completedModuleIds.add(record.moduleId);
+  }
+
+  const overview = Array.from(byProvider.values()).map((entry) => ({
+    provider: entry.provider,
+    lastActivityAt: entry.lastActivityAt,
+    completedCount: entry.completedModuleIds.size,
+    totalModules: modules.length,
+    completedModuleIds: Array.from(entry.completedModuleIds),
+  }));
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Training completion overview fetched",
+    data: { modules, providers: overview },
+  });
+});
+
+/**
+ * PATCH /admin/providers/:id/training/reset
+ * Provider ki training progress reset karta hai — server-side history
+ * delete nahi karta (audit ke liye rehti hai), lekin ek "resetAt" timestamp
+ * save karta hai jis se pehle ke saare completions app ke liye "ginte nahi".
+ */
+export const resetProviderTraining = catchAsync(async (req, res) => {
+  const { id } = req.params;
+
+  const provider = await User.findOne({ _id: id, role: "provider" });
+  if (!provider) {
+    throw new AppError(httpStatus.NOT_FOUND, "Provider not found");
+  }
+
+  provider.trainingResetAt = new Date();
+  await provider.save();
+
+  await recordActivity({
+    req,
+    action: "provider.training.reset",
+    entityType: "user",
+    entityId: provider._id,
+  });
+
+  broadcast("admin_provider_updated", { providerId: provider._id.toString() });
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Provider's training progress has been reset",
+    data: { trainingResetAt: provider.trainingResetAt },
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════
+// PROVIDER VERIFICATION — extra fields (NI status, insurance metadata,
+// driveway checklist). Identity/document approve-reject already existed
+// (updateProviderVerification above) — ye endpoint sirf naye fields ke liye.
+// ════════════════════════════════════════════════════════════════════════
+
+/**
+ * PATCH /admin/providers/:id/verification-details
+ * Body (sab optional, jo bhejo wahi update hoga):
+ *   nationalInsuranceStatus: "pending" | "verified" | "rejected"
+ *   insurance: { policyNumber, insuranceCompany, expiryDate, status, rejectionReason }
+ *   driveway: { isSafeWorkingArea, isResidentialAreaSuitable, isPrivateProperty,
+ *               hasPermission, noRoadPayment, oneCarSpaceOnly, notSharedOrCommunal }
+ */
+export const updateProviderVerificationDetails = catchAsync(async (req, res) => {
+  const { id } = req.params;
+  const { nationalInsuranceStatus, insurance, driveway } = req.body || {};
+
+  const provider = await User.findOne({ _id: id, role: "provider" });
+  if (!provider) {
+    throw new AppError(httpStatus.NOT_FOUND, "Provider not found");
+  }
+
+  const validStatuses = ["pending", "verified", "rejected"];
+
+  if (nationalInsuranceStatus) {
+    if (!validStatuses.includes(nationalInsuranceStatus)) {
+      throw new AppError(httpStatus.BAD_REQUEST, "Invalid nationalInsuranceStatus");
+    }
+    provider.nationalInsuranceStatus = nationalInsuranceStatus;
+  }
+
+  if (insurance && typeof insurance === "object") {
+    provider.publicLiabilityInsurance = provider.publicLiabilityInsurance || {};
+    if (typeof insurance.policyNumber === "string") {
+      provider.publicLiabilityInsurance.policyNumber = insurance.policyNumber.trim();
+    }
+    if (typeof insurance.insuranceCompany === "string") {
+      provider.publicLiabilityInsurance.insuranceCompany = insurance.insuranceCompany.trim();
+    }
+    if (insurance.expiryDate) {
+      const parsed = new Date(insurance.expiryDate);
+      if (!isNaN(parsed.getTime())) {
+        provider.publicLiabilityInsurance.expiryDate = parsed;
+      }
+    }
+    if (insurance.status) {
+      if (!validStatuses.includes(insurance.status)) {
+        throw new AppError(httpStatus.BAD_REQUEST, "Invalid insurance status");
+      }
+      provider.publicLiabilityInsurance.status = insurance.status;
+    }
+    if (typeof insurance.rejectionReason === "string") {
+      provider.publicLiabilityInsurance.rejectionReason = insurance.rejectionReason.trim();
+    }
+  }
+
+  if (driveway && typeof driveway === "object") {
+    provider.drivewayEligibility = provider.drivewayEligibility || {};
+    const drivewayFields = [
+      "isPrivateProperty",
+      "hasPermission",
+      "noRoadPayment",
+      "oneCarSpaceOnly",
+      "notSharedOrCommunal",
+      "isSafeWorkingArea",
+      "isResidentialAreaSuitable",
+    ];
+    for (const field of drivewayFields) {
+      if (typeof driveway[field] === "boolean") {
+        provider.drivewayEligibility[field] = driveway[field];
+      }
+    }
+  }
+
+  await provider.save();
+
+  await recordActivity({
+    req,
+    action: "provider.verification_details_updated",
+    entityType: "user",
+    entityId: provider._id,
+    metadata: { nationalInsuranceStatus, insurance, driveway },
+  });
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Verification details updated",
+    data: {
+      nationalInsuranceStatus: provider.nationalInsuranceStatus,
+      publicLiabilityInsurance: provider.publicLiabilityInsurance,
+      drivewayEligibility: provider.drivewayEligibility,
+    },
+  });
+});
+
+/**
+ * GET /admin/providers/insurance-expiring
+ * Query: days (default 30) — kaunsi insurances itne dinon mein expire ho rahi hain.
+ * Renewal reminder banane ke liye admin/cron dono use kar sakte hain.
+ */
+export const getExpiringInsurance = catchAsync(async (req, res) => {
+  const days = Number(req.query.days) || 30;
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() + days);
+
+  const providers = await User.find({
+    role: "provider",
+    "publicLiabilityInsurance.expiryDate": { $ne: null, $lte: cutoff },
+  })
+    .select("name email publicLiabilityInsurance")
+    .lean();
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Providers with expiring insurance fetched",
+    data: providers,
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════
+// PROVIDER VERIFICATION REMINDERS
+// ════════════════════════════════════════════════════════════════════════
+
+/**
+ * Provider ke documents mein se kaunse missing hain — yehi logic checklist
+ * badges (Missing/Open) banane ke liye bhi use hoti hai, taake reminder
+ * aur UI hamesha ek doosre se match karein.
+ */
+const findMissingDocuments = (provider) => {
+  const missing = [];
+
+  if (!provider.photo?.url) missing.push("Selfie photo");
+  if (!provider.identityVerification?.passportOrDrivingLicenseFile?.url) {
+    missing.push("Passport / Licence");
+  }
+  const insuranceUrl =
+    provider.publicLiabilityInsurance?.document?.url || provider.insurance?.document?.url;
+  if (!insuranceUrl) missing.push("Public Liability Insurance");
+  if (!provider.drivewayPhoto?.document?.url) missing.push("Driveway Photo");
+
+  const bank = provider.bankDetails || {};
+  const hasBankDetails = Boolean(
+    bank.accountHolderName &&
+      bank.address &&
+      bank.city &&
+      bank.postcode &&
+      bank.dateOfBirth &&
+      bank.accountNumber &&
+      bank.sortCode
+  );
+  if (!hasBankDetails) missing.push("Bank Details");
+
+  return missing;
+};
+
+/**
+ * POST /admin/providers/:id/send-verification-reminder
+ * Body: { message? } — admin apna matn bhej sakta hai, warna khud missing
+ * documents ki list se ek matn ban jata hai.
+ */
+export const sendVerificationReminder = catchAsync(async (req, res) => {
+  const { id } = req.params;
+  const customMessage = (req.body?.message || "").toString().trim();
+
+  const provider = await User.findOne({ _id: id, role: "provider" });
+  if (!provider) {
+    throw new AppError(httpStatus.NOT_FOUND, "Provider not found");
+  }
+
+  const missing = findMissingDocuments(provider);
+
+  if (!customMessage && missing.length === 0) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "This provider has no missing documents. Add a custom message to send a reminder anyway."
+    );
+  }
+
+  const message =
+    customMessage ||
+    `Your OWVO verification is incomplete. Please upload: ${missing.join(", ")}.`;
+
+  const notification = await Notification.create({
+    recipient: provider._id,
+    type: "verification_reminder",
+    title: "Verification reminder",
+    message,
+    sentBy: req.user._id,
+    metadata: { missingDocuments: missing },
+  });
+
+  // Provider abhi app mein hai to turant dikh jaye; nahi hai to agli baar
+  // app kholte hi notification list se mil jayega (database mein save ho
+  // chuki hai).
+  emitToUser(provider._id.toString(), "new_notification", {
+    _id: notification._id,
+    title: notification.title,
+    message: notification.message,
+    type: notification.type,
+    createdAt: notification.createdAt,
+  });
+
+  await recordActivity({
+    req,
+    action: "provider.verification_reminder_sent",
+    entityType: "user",
+    entityId: provider._id,
+    metadata: { missingDocuments: missing, customMessage: Boolean(customMessage) },
+  });
+
+  sendResponse(res, {
+    statusCode: httpStatus.CREATED,
+    success: true,
+    message: "Reminder sent",
+    data: notification,
   });
 });

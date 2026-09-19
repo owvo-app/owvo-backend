@@ -20,6 +20,14 @@ import {
   goOnline,
   removePreferredService,
   submitTrainingCompletion,
+  getTrainingModules,
+  verifyPostcode,
+  getMyNotifications,
+  markAllNotificationsRead,
+  getWalletSummary,
+  getWalletPayouts,
+  getWalletEarnings,
+  emailWalletStatement,
   // ─── Location ─────────────────────────────────────────────────────────────
   updateWasherLocation,
   updateWasherAvailability,
@@ -43,6 +51,14 @@ router.get("/status", protect, getWasherStatus);
 router.get("/policies", protect, getWasherPolicyStatus);
 router.post("/policies/accept", protect, acceptWasherPolicies);
 router.post("/training/complete", protect, submitTrainingCompletion);
+router.get("/training/modules", protect, getTrainingModules);
+router.post("/verify-postcode", protect, verifyPostcode);
+router.get("/notifications", protect, getMyNotifications);
+router.patch("/notifications/read-all", protect, markAllNotificationsRead);
+router.get("/wallet/summary", protect, getWalletSummary);
+router.get("/wallet/payouts", protect, getWalletPayouts);
+router.get("/wallet/earnings", protect, getWalletEarnings);
+router.post("/wallet/email-statement", protect, emailWalletStatement);
 router.get("/availability", protect, getWasherAvailability);
 router.put("/availability", protect, updateWasherAvailability);
 router.post("/online", protect, goOnline);

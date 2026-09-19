@@ -7,7 +7,12 @@ import { Rating } from "../model/rating.model.js";
 import { Service } from "../model/service.model.js";
 import { User } from "../model/user.model.js";
 import ProviderAcceptance from "../model/providerAcceptance.model.js";
+import { TrainingModule } from "../model/trainingModule.model.js";
+import { Notification } from "../model/notification.model.js";
 import { WashHistory } from "../model/WashHistory.model.js";
+import { PlatformSetting } from "../model/platformSetting.model.js";
+import { Payout } from "../model/payout.model.js";
+import { sendEmail } from "../utils/sendEmail.js";
 import { broadcast, emitToUser } from "../socket/socket.js";
 import {
   isProviderAvailableNow,
@@ -220,6 +225,10 @@ export const acceptWasherPolicies = catchAsync(async (req, res) => {
   const {
     safetyGuidelinesAccepted,
     washerAgreementAccepted,
+    termsConditionsAccepted,
+    privacyPolicyAccepted,
+    marketplaceRulesAccepted,
+    independentContractorAgreementAccepted,
     device,
     appVersion,
   } = req.body || {};
@@ -229,30 +238,33 @@ export const acceptWasherPolicies = catchAsync(async (req, res) => {
   washer.policyAcceptance = washer.policyAcceptance || {};
   washer.policyAcceptance.version = WASHER_POLICY_VERSION;
 
+  // Har flag: request body mein jo naam aata hai, policyAcceptance mein
+  // jo field set hoti hai, aur audit log mein jo "type" jata hai.
+  const flagMap = [
+    { input: safetyGuidelinesAccepted, field: "safetyGuidelines", type: "safety_guidelines" },
+    { input: washerAgreementAccepted, field: "washerAgreement", type: "washer_agreement" },
+    { input: termsConditionsAccepted, field: "termsConditions", type: "terms_conditions" },
+    { input: privacyPolicyAccepted, field: "privacyPolicy", type: "privacy_policy" },
+    { input: marketplaceRulesAccepted, field: "marketplaceRules", type: "marketplace_rules" },
+    {
+      input: independentContractorAgreementAccepted,
+      field: "independentContractorAgreement",
+      type: "independent_contractor_agreement",
+    },
+  ];
+
   // Har acceptance ka ek alag audit record banate hain, taake purani
   // history bhi mehfooz rahe (sirf abhi ka status nahi).
   const auditEntries = [];
 
-  if (safetyGuidelinesAccepted === true) {
-    washer.policyAcceptance.safetyGuidelinesAccepted = true;
-    washer.policyAcceptance.safetyGuidelinesAcceptedAt = now;
-    auditEntries.push({
-      provider: washer._id,
-      type: "safety_guidelines",
-      version: WASHER_POLICY_VERSION,
-      acceptedAt: now,
-      device: device || "",
-      appVersion: appVersion || "",
-      ipAddress,
-    });
-  }
+  for (const { input, field, type } of flagMap) {
+    if (input !== true) continue;
 
-  if (washerAgreementAccepted === true) {
-    washer.policyAcceptance.washerAgreementAccepted = true;
-    washer.policyAcceptance.washerAgreementAcceptedAt = now;
+    washer.policyAcceptance[`${field}Accepted`] = true;
+    washer.policyAcceptance[`${field}AcceptedAt`] = now;
     auditEntries.push({
       provider: washer._id,
-      type: "washer_agreement",
+      type,
       version: WASHER_POLICY_VERSION,
       acceptedAt: now,
       device: device || "",
@@ -1432,5 +1444,506 @@ export const getWeeklyIncomeProvider = catchAsync(async (req, res) => {
       bookingCount,
       dailyBreakdown: dailyBreakdownArray,
     },
+  });
+});
+/**
+ * GET /washers/training/modules
+ * Provider Academy ki maujooda list — admin jo bhi upload/reorder/mandatory
+ * kare, ye endpoint hamesha taaza data deta hai. Har module ke sath ye bhi
+ * bata deta hai ke YE provider isay complete kar chuka hai ya nahi (aur
+ * agar admin ne training reset ki ho to us tareekh ke baad ka hi ginte hain).
+ */
+export const getTrainingModules = catchAsync(async (req, res) => {
+  const provider = await User.findById(req.user._id).select("trainingResetAt");
+
+  const modules = await TrainingModule.find({ isActive: true })
+    .sort({ order: 1 })
+    .lean();
+
+  const completionQuery = {
+    provider: req.user._id,
+    type: "training_module",
+  };
+  if (provider?.trainingResetAt) {
+    completionQuery.createdAt = { $gte: provider.trainingResetAt };
+  }
+
+  const completions = await ProviderAcceptance.find(completionQuery)
+    .select("moduleId")
+    .lean();
+  const completedModuleIds = new Set(completions.map((c) => c.moduleId));
+
+  const result = modules.map((m) => ({
+    _id: m._id,
+    title: m.title,
+    topics: m.topics,
+    videoUrl: m.videoUrl,
+    durationSeconds: m.durationSeconds,
+    order: m.order,
+    isMandatory: m.isMandatory,
+    isCompleted: completedModuleIds.has(m._id.toString()),
+  }));
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Training modules fetched",
+    data: result,
+  });
+});
+
+/**
+ * POST /washers/verify-postcode
+ * Body: { postcode }
+ * UK postcode ko validate karta hai aur uski city/county/coordinates
+ * wapas deta hai — provider address form khud-ba-khud check/fill kar
+ * sakta hai. postcodes.io use kiya hai (Google Maps ki jagah): ye free,
+ * open UK postcode dataset hai, koi API key ya billing setup nahi chahiye.
+ */
+export const verifyPostcode = catchAsync(async (req, res) => {
+  const { postcode } = req.body || {};
+
+  if (!postcode || typeof postcode !== "string" || !postcode.trim()) {
+    throw new AppError(httpStatus.BAD_REQUEST, "postcode is required");
+  }
+
+  const cleaned = postcode.trim().replace(/\s+/g, "");
+
+  let response;
+  try {
+    response = await fetch(
+      `https://api.postcodes.io/postcodes/${encodeURIComponent(cleaned)}`
+    );
+  } catch (err) {
+    throw new AppError(
+      httpStatus.SERVICE_UNAVAILABLE,
+      "Could not reach the postcode lookup service. Please try again."
+    );
+  }
+
+  if (response.status === 404) {
+    sendResponse(res, {
+      statusCode: httpStatus.OK,
+      success: true,
+      message: "Postcode not found",
+      data: { valid: false },
+    });
+    return;
+  }
+
+  if (!response.ok) {
+    throw new AppError(
+      httpStatus.SERVICE_UNAVAILABLE,
+      "Postcode lookup failed. Please try again."
+    );
+  }
+
+  const payload = await response.json();
+  const result = payload?.result;
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Postcode verified",
+    data: {
+      valid: true,
+      postcode: result?.postcode,
+      city: result?.admin_district || result?.parish || "",
+      county: result?.admin_county || result?.region || "",
+      country: result?.country || "England",
+      latitude: result?.latitude,
+      longitude: result?.longitude,
+    },
+  });
+});
+
+/**
+ * GET /washers/notifications
+ * Provider ki apni notifications — jaise admin ke bheje huye reminders.
+ * Newest pehle. unreadCount bhi deta hai taake badge dikha sakein.
+ */
+export const getMyNotifications = catchAsync(async (req, res) => {
+  const notifications = await Notification.find({ recipient: req.user._id })
+    .sort({ createdAt: -1 })
+    .limit(100)
+    .lean();
+
+  const unreadCount = await Notification.countDocuments({
+    recipient: req.user._id,
+    isRead: false,
+  });
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Notifications fetched",
+    data: { notifications, unreadCount },
+  });
+});
+
+/**
+ * PATCH /washers/notifications/read-all
+ * Provider notification tab kholte hi call hota hai — sab read mark ho
+ * jati hain, badge saaf ho jata hai.
+ */
+export const markAllNotificationsRead = catchAsync(async (req, res) => {
+  await Notification.updateMany(
+    { recipient: req.user._id, isRead: false },
+    { $set: { isRead: true } }
+  );
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Notifications marked as read",
+    data: null,
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════
+// WALLET — provider ki apni earnings, payouts, aur booking-level breakdown.
+// ════════════════════════════════════════════════════════════════════════
+
+const asMoney = (amount) => Math.round((Number(amount) || 0) * 100) / 100;
+
+const getPlatformSettingsDoc = async () =>
+  PlatformSetting.findOneAndUpdate(
+    { key: "global" },
+    { $setOnInsert: { key: "global" } },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
+
+/**
+ * Ek booking ki gross value se provider ka net (commission minus) hissa
+ * nikalta hai. Sab wallet endpoints yehi ek jagah se rate leti hain —
+ * admin jab chahe Settings se rate badle, sab khud update ho jata hai.
+ */
+const netProviderShare = (grossAmount, commissionRate) =>
+  asMoney(grossAmount * (1 - commissionRate));
+
+/**
+ * GET /washers/wallet/summary
+ * Available balance, pending balance, lifetime earnings, this week, today,
+ * tips, commission rate, aur total jobs — sab NET (commission minus) hain.
+ */
+export const getWalletSummary = catchAsync(async (req, res) => {
+  const providerId = req.user._id;
+  const settings = await getPlatformSettingsDoc();
+  const commissionRate = Number(settings.commissionRate) || 0.25;
+
+  const now = new Date();
+  const todayStart = new Date(now);
+  todayStart.setUTCHours(0, 0, 0, 0);
+
+  const currentDay = now.getUTCDay();
+  const weekStart = new Date(now);
+  weekStart.setUTCDate(now.getUTCDate() - (currentDay === 0 ? 6 : currentDay - 1));
+  weekStart.setUTCHours(0, 0, 0, 0);
+
+  const completedFilter = { provider: providerId, status: "completed" };
+
+  const [lifetimeAgg, weekAgg, todayAgg, jobsCompleted, tipsAgg, paidOutAgg] =
+    await Promise.all([
+      Booking.aggregate([
+        { $match: completedFilter },
+        { $group: { _id: null, total: { $sum: "$finalPrice" } } },
+      ]),
+      Booking.aggregate([
+        { $match: { ...completedFilter, completedAt: { $gte: weekStart } } },
+        { $group: { _id: null, total: { $sum: "$finalPrice" } } },
+      ]),
+      Booking.aggregate([
+        { $match: { ...completedFilter, completedAt: { $gte: todayStart } } },
+        { $group: { _id: null, total: { $sum: "$finalPrice" } } },
+      ]),
+      Booking.countDocuments(completedFilter),
+      paymentInfo.aggregate([
+        {
+          $match: {
+            providerId: new mongoose.Types.ObjectId(providerId),
+            type: "tips",
+            paymentStatus: "complete",
+          },
+        },
+        { $group: { _id: null, total: { $sum: "$price" } } },
+      ]),
+      Payout.aggregate([
+        { $match: { provider: providerId, status: "paid" } },
+        { $group: { _id: null, total: { $sum: "$amount" } } },
+      ]),
+    ]);
+
+  const lifetimeGross = lifetimeAgg[0]?.total || 0;
+  const weekGross = weekAgg[0]?.total || 0;
+  const todayGross = todayAgg[0]?.total || 0;
+  const totalTips = asMoney(tipsAgg[0]?.total || 0);
+  const totalPaidOut = asMoney(paidOutAgg[0]?.total || 0);
+
+  const lifetimeNet = asMoney(
+    netProviderShare(lifetimeGross, commissionRate) + totalTips
+  );
+  const weekNet = asMoney(netProviderShare(weekGross, commissionRate));
+  const todayNet = asMoney(netProviderShare(todayGross, commissionRate));
+
+  // Pending = payouts jo ban chuke hain lekin abhi provider ke bank tak
+  // nahi pahunche (queue mein hain). Available = kamaya hua paisa jo
+  // abhi tak kisi payout mein shamil nahi hua.
+  const pendingPayoutsAgg = await Payout.aggregate([
+    {
+      $match: {
+        provider: providerId,
+        status: { $in: ["pending", "processing"] },
+      },
+    },
+    { $group: { _id: null, total: { $sum: "$amount" } } },
+  ]);
+  const pendingBalance = asMoney(pendingPayoutsAgg[0]?.total || 0);
+  const availableBalance = asMoney(
+    Math.max(0, lifetimeNet - totalPaidOut - pendingBalance)
+  );
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Wallet summary fetched",
+    data: {
+      availableBalance,
+      pendingBalance,
+      lifetimeEarnings: lifetimeNet,
+      thisWeekEarnings: weekNet,
+      todayEarnings: todayNet,
+      totalTips,
+      commissionRate,
+      totalJobsCompleted: jobsCompleted,
+    },
+  });
+});
+
+/**
+ * GET /washers/wallet/payouts
+ * Provider ki apni payout history — Payout collection se, jo admin
+ * banata hai. Sabse pehla "pending"/"processing" record hi "next payout"
+ * hai — koi fixed schedule nahi manaya gaya, jo asal mein bana hai wohi
+ * dikhaya jata hai.
+ */
+export const getWalletPayouts = catchAsync(async (req, res) => {
+  const providerId = req.user._id;
+
+  const payouts = await Payout.find({ provider: providerId })
+    .sort({ createdAt: -1 })
+    .limit(100)
+    .lean();
+
+  const nextPayout =
+    payouts.find((p) => ["pending", "processing"].includes(p.status)) || null;
+  const lastPaidPayout = payouts.find((p) => p.status === "paid") || null;
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Payout history fetched",
+    data: {
+      payouts,
+      nextPayout: nextPayout
+        ? { date: nextPayout.payoutDate, status: nextPayout.status, amount: nextPayout.amount }
+        : null,
+      lastPayout: lastPaidPayout
+        ? { date: lastPaidPayout.paidAt, amount: lastPaidPayout.amount }
+        : null,
+    },
+  });
+});
+
+/**
+ * GET /washers/wallet/earnings?period=today|week|month|custom&from=&to=
+ * Har booking ka poora breakdown — service, gross price, provider ka
+ * hissa, OWVO commission, tip, tareekh.
+ */
+export const getWalletEarnings = catchAsync(async (req, res) => {
+  const providerId = req.user._id;
+  const { period = "week", from, to } = req.query;
+
+  const settings = await getPlatformSettingsDoc();
+  const commissionRate = Number(settings.commissionRate) || 0.25;
+
+  const now = new Date();
+  let rangeStart;
+  let rangeEnd = now;
+
+  if (period === "today") {
+    rangeStart = new Date(now);
+    rangeStart.setUTCHours(0, 0, 0, 0);
+  } else if (period === "month") {
+    rangeStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  } else if (period === "custom") {
+    if (!from || !to) {
+      throw new AppError(httpStatus.BAD_REQUEST, "from and to are required for a custom range");
+    }
+    rangeStart = new Date(from);
+    rangeEnd = new Date(to);
+    if (isNaN(rangeStart.getTime()) || isNaN(rangeEnd.getTime())) {
+      throw new AppError(httpStatus.BAD_REQUEST, "Invalid from/to date");
+    }
+  } else {
+    // default: this week (Monday-based, matches the rest of the app)
+    const currentDay = now.getUTCDay();
+    rangeStart = new Date(now);
+    rangeStart.setUTCDate(now.getUTCDate() - (currentDay === 0 ? 6 : currentDay - 1));
+    rangeStart.setUTCHours(0, 0, 0, 0);
+  }
+
+  const bookings = await Booking.find({
+    provider: providerId,
+    status: "completed",
+    completedAt: { $gte: rangeStart, $lte: rangeEnd },
+  })
+    .populate("service", "title")
+    .sort({ completedAt: -1 })
+    .lean();
+
+  const bookingIds = bookings.map((b) => b._id);
+  const tips = await paymentInfo
+    .find({
+      type: "tips",
+      paymentStatus: "complete",
+      bookingId: { $in: bookingIds },
+    })
+    .lean();
+  const tipByBooking = new Map(tips.map((t) => [String(t.bookingId), t.price || 0]));
+
+  const rows = bookings.map((booking) => {
+    const gross = booking.finalPrice || 0;
+    const commissionAmount = asMoney(gross * commissionRate);
+    const providerEarning = asMoney(gross - commissionAmount);
+    const tip = asMoney(tipByBooking.get(String(booking._id)) || 0);
+
+    return {
+      bookingId: booking._id,
+      serviceName: booking.service?.title || "Service",
+      servicePrice: gross,
+      providerEarning,
+      commissionAmount,
+      tip,
+      completedAt: booking.completedAt,
+      // Completed booking ka matlab hai payment pehle hi settle ho chuka
+      // hai (booking flow payment-first hai) — koi alag paymentStatus
+      // field Booking model mein nahi hai.
+      paymentStatus: "paid",
+    };
+  });
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Earnings breakdown fetched",
+    data: {
+      period,
+      from: rangeStart,
+      to: rangeEnd,
+      commissionRate,
+      rows,
+    },
+  });
+});
+
+/**
+ * POST /washers/wallet/email-statement
+ * Body: { period: "today" | "week" | "month" }
+ * Aaj ke, is hafte ke, ya is mahine ke earnings ka statement provider ke
+ * apne registered email par bhejta hai. Wahi commission-split calculation
+ * use karta hai jo /wallet/earnings mein hai — dono hamesha match karenge.
+ */
+export const emailWalletStatement = catchAsync(async (req, res) => {
+  const providerId = req.user._id;
+  const period = (req.body?.period || "month").toString();
+
+  const provider = await User.findById(providerId).select("name email");
+  if (!provider?.email) {
+    throw new AppError(httpStatus.BAD_REQUEST, "No email address on file for this account");
+  }
+
+  const settings = await getPlatformSettingsDoc();
+  const commissionRate = Number(settings.commissionRate) || 0.25;
+
+  const now = new Date();
+  let rangeStart;
+  let periodLabel;
+  if (period === "today") {
+    rangeStart = new Date(now);
+    rangeStart.setUTCHours(0, 0, 0, 0);
+    periodLabel = "Today";
+  } else if (period === "week") {
+    const currentDay = now.getUTCDay();
+    rangeStart = new Date(now);
+    rangeStart.setUTCDate(now.getUTCDate() - (currentDay === 0 ? 6 : currentDay - 1));
+    rangeStart.setUTCHours(0, 0, 0, 0);
+    periodLabel = "This Week";
+  } else {
+    rangeStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    periodLabel = "This Month";
+  }
+
+  const bookings = await Booking.find({
+    provider: providerId,
+    status: "completed",
+    completedAt: { $gte: rangeStart, $lte: now },
+  })
+    .populate("service", "title")
+    .sort({ completedAt: -1 })
+    .lean();
+
+  let grossTotal = 0;
+  let netTotal = 0;
+  const rowsHtml = bookings
+    .map((booking) => {
+      const gross = booking.finalPrice || 0;
+      const commission = asMoney(gross * commissionRate);
+      const net = asMoney(gross - commission);
+      grossTotal += gross;
+      netTotal += net;
+      const dateLabel = booking.completedAt
+        ? new Date(booking.completedAt).toLocaleDateString("en-GB")
+        : "-";
+      return `<tr>
+        <td style="padding:8px;border-bottom:1px solid #e5e7eb;">${dateLabel}</td>
+        <td style="padding:8px;border-bottom:1px solid #e5e7eb;">${booking.service?.title || "Service"}</td>
+        <td style="padding:8px;border-bottom:1px solid #e5e7eb;text-align:right;">£${gross.toFixed(2)}</td>
+        <td style="padding:8px;border-bottom:1px solid #e5e7eb;text-align:right;">-£${commission.toFixed(2)}</td>
+        <td style="padding:8px;border-bottom:1px solid #e5e7eb;text-align:right;">£${net.toFixed(2)}</td>
+      </tr>`;
+    })
+    .join("");
+
+  const html = `
+    <div style="font-family:Arial,sans-serif;max-width:640px;margin:auto;">
+      <h2 style="color:#0b1420;">OWVO Earnings Statement — ${periodLabel}</h2>
+      <p style="color:#636363;">Hi ${provider.name || "there"}, here is your earnings summary for ${periodLabel.toLowerCase()}.</p>
+      <table style="width:100%;border-collapse:collapse;margin-top:16px;font-size:14px;">
+        <thead>
+          <tr style="background:#f3f4f6;">
+            <th style="padding:8px;text-align:left;">Date</th>
+            <th style="padding:8px;text-align:left;">Service</th>
+            <th style="padding:8px;text-align:right;">Price</th>
+            <th style="padding:8px;text-align:right;">OWVO ${Math.round(commissionRate * 100)}%</th>
+            <th style="padding:8px;text-align:right;">Your Earning</th>
+          </tr>
+        </thead>
+        <tbody>${rowsHtml || '<tr><td colspan="5" style="padding:12px;color:#9ca3af;">No completed washes in this period.</td></tr>'}</tbody>
+      </table>
+      <p style="margin-top:18px;font-size:15px;">
+        <strong>Total earned: £${asMoney(netTotal).toFixed(2)}</strong>
+        (from £${asMoney(grossTotal).toFixed(2)} gross, ${bookings.length} job${bookings.length === 1 ? "" : "s"})
+      </p>
+      <p style="color:#9ca3af;font-size:12px;margin-top:24px;">This is an automated statement from OWVO.</p>
+    </div>
+  `;
+
+  await sendEmail(provider.email, `OWVO Earnings Statement — ${periodLabel}`, html);
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Statement emailed",
+    data: { email: provider.email, jobCount: bookings.length },
   });
 });

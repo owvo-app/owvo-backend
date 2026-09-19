@@ -92,11 +92,26 @@ const userSchema = new Schema(
     isBusy: { type: Boolean, default: false },
     dailyWashLimit: { type: Number, default: 7 },
     dailyWashLimitMax: { type: Number, min: 1, max: 50 },
+    // Admin "reset training" dabaye to yahan waqt save hota hai — is se
+    // PEHLE ke saare training completions provider ke liye "ginte" nahi,
+    // isay dobara har module dekhna parta hai. Audit history (ProviderAcceptance)
+    // delete nahi hoti, sirf gating ka reference point badalta hai.
+    trainingResetAt: { type: Date, default: null },
     policyAcceptance: {
       safetyGuidelinesAccepted: { type: Boolean, default: false },
       safetyGuidelinesAcceptedAt: { type: Date },
       washerAgreementAccepted: { type: Boolean, default: false },
       washerAgreementAcceptedAt: { type: Date },
+      // Client ke 6-item Provider Agreement list ke baaqi 4 — Terms aur
+      // Safety/Washer Agreement pehle se the
+      termsConditionsAccepted: { type: Boolean, default: false },
+      termsConditionsAcceptedAt: { type: Date },
+      privacyPolicyAccepted: { type: Boolean, default: false },
+      privacyPolicyAcceptedAt: { type: Date },
+      marketplaceRulesAccepted: { type: Boolean, default: false },
+      marketplaceRulesAcceptedAt: { type: Date },
+      independentContractorAgreementAccepted: { type: Boolean, default: false },
+      independentContractorAgreementAcceptedAt: { type: Date },
       version: { type: String, default: "2026-06-03" },
     },
     availability: {
@@ -145,6 +160,11 @@ const userSchema = new Schema(
 
     serviceArea: { type: String, trim: true, default: "" },
     nationalInsuranceNumber: { type: String, trim: true, default: "" },
+    nationalInsuranceStatus: {
+      type: String,
+      enum: ["pending", "verified", "rejected"],
+      default: "pending",
+    },
 
     photo: {
         public_id: { type: String, default: "" },
@@ -204,6 +224,9 @@ const userSchema = new Schema(
       noRoadPayment: { type: Boolean, default: false },
       oneCarSpaceOnly: { type: Boolean, default: false },
       notSharedOrCommunal: { type: Boolean, default: false },
+      // Client ke 6-item checklist ke baaqi 2 — pehle 4 pehle se maujood thay
+      isSafeWorkingArea: { type: Boolean, default: false },
+      isResidentialAreaSuitable: { type: Boolean, default: false },
     },
 
     isIdentityCompleted: { type: Boolean, default: false },
@@ -240,9 +263,26 @@ const userSchema = new Schema(
         url: { type: String, default: "" },
       },
       uploadedAt: { type: Date },
+      policyNumber: { type: String, trim: true, default: "" },
+      insuranceCompany: { type: String, trim: true, default: "" },
+      expiryDate: { type: Date, default: null },
+      status: {
+        type: String,
+        enum: ["pending", "verified", "rejected"],
+        default: "pending",
+      },
+      rejectionReason: { type: String, trim: true, default: "" },
     },
 
     drivewayPhoto: {
+      document: {
+        public_id: { type: String, default: "" },
+        url: { type: String, default: "" },
+      },
+      uploadedAt: { type: Date },
+    },
+    // Optional dusri photo — driveway tak entrance/gaadi kahan se andar aati hai
+    entrancePhoto: {
       document: {
         public_id: { type: String, default: "" },
         url: { type: String, default: "" },

@@ -23,6 +23,8 @@ const providerAcceptanceSchema = new mongoose.Schema(
         "training_module",
         "terms_conditions",
         "privacy_policy",
+        "marketplace_rules",
+        "independent_contractor_agreement",
       ],
       required: true,
     },
