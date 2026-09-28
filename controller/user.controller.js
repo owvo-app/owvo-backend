@@ -330,6 +330,35 @@ export const updateProfile = catchAsync(async (req, res) => {
       if (residentialAddress === undefined) user.residentialAddress = providerAddressLine;
       if (serviceArea === undefined) user.serviceArea = providerAddressLine;
     }
+
+    // Postcode se GPS coordinates nikal kar location field mein save kar
+    // dete hain — is se pehle sirf "Go Online" hone par (live GPS se)
+    // location set hoti thi, matlab naye providers jab tak online na
+    // jaayein customer ko nazar hi nahi aate thay. Ab address submit
+    // karte hi search-eligible ho jaate hain. postcodes.io free hai,
+    // koi API key nahi chahiye.
+    if (providerPostcode) {
+      try {
+        const cleaned = String(providerPostcode).trim().replace(/\s+/g, "");
+        const geoResponse = await fetch(
+          `https://api.postcodes.io/postcodes/${encodeURIComponent(cleaned)}`
+        );
+        if (geoResponse.ok) {
+          const geoPayload = await geoResponse.json();
+          const result = geoPayload?.result;
+          if (result?.latitude && result?.longitude) {
+            user.location = {
+              type: "Point",
+              coordinates: [result.longitude, result.latitude],
+            };
+          }
+        }
+      } catch (err) {
+        // Geocoding fail ho to bhi address save hona chahiye — provider
+        // baad mein "Go Online" karega to live GPS se location aa jayegi.
+        console.error("Postcode geocoding failed:", err);
+      }
+    }
   }
   if (nationalInsuranceNumber !== undefined) user.nationalInsuranceNumber = nationalInsuranceNumber;
 
