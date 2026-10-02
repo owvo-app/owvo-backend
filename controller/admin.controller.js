@@ -2558,7 +2558,7 @@ export const getAllTrainingModules = catchAsync(async (req, res) => {
  * Naya module banata hai — video Cloudinary par jati hai.
  */
 export const createTrainingModule = catchAsync(async (req, res) => {
-  const { title, topics, isMandatory } = req.body || {};
+  const { title, description, topics, isMandatory } = req.body || {};
 
   if (!title || typeof title !== "string") {
     throw new AppError(httpStatus.BAD_REQUEST, "title is required");
@@ -2596,6 +2596,7 @@ export const createTrainingModule = catchAsync(async (req, res) => {
 
   const module = await TrainingModule.create({
     title,
+    description: (description || "").toString().trim(),
     topics: parsedTopics,
     videoUrl: uploaded.secure_url,
     cloudinaryPublicId: uploaded.public_id,
@@ -2628,7 +2629,8 @@ export const createTrainingModule = catchAsync(async (req, res) => {
  */
 export const updateTrainingModule = catchAsync(async (req, res) => {
   const { id } = req.params;
-  const { title, topics, isMandatory, isActive } = req.body || {};
+  const { title, description, topics, isMandatory, isActive, trainingVersion } =
+    req.body || {};
 
   const module = await TrainingModule.findById(id);
   if (!module) {
@@ -2636,9 +2638,13 @@ export const updateTrainingModule = catchAsync(async (req, res) => {
   }
 
   if (typeof title === "string" && title.trim()) module.title = title.trim();
+  if (typeof description === "string") module.description = description.trim();
   if (Array.isArray(topics)) module.topics = topics;
   if (typeof isMandatory === "boolean") module.isMandatory = isMandatory;
   if (typeof isActive === "boolean") module.isActive = isActive;
+  if (typeof trainingVersion === "string" && trainingVersion.trim()) {
+    module.trainingVersion = trainingVersion.trim();
+  }
 
   await module.save();
 
@@ -2801,7 +2807,7 @@ export const deactivateTrainingModule = catchAsync(async (req, res) => {
 export const getTrainingCompletionOverview = catchAsync(async (req, res) => {
   const modules = await TrainingModule.find({ isActive: true })
     .sort({ order: 1 })
-    .select("_id title")
+    .select("_id title trainingVersion")
     .lean();
 
   const completions = await ProviderAcceptance.find({
@@ -2828,13 +2834,26 @@ export const getTrainingCompletionOverview = catchAsync(async (req, res) => {
     byProvider.get(providerId).completedModuleIds.add(record.moduleId);
   }
 
-  const overview = Array.from(byProvider.values()).map((entry) => ({
-    provider: entry.provider,
-    lastActivityAt: entry.lastActivityAt,
-    completedCount: entry.completedModuleIds.size,
-    totalModules: modules.length,
-    completedModuleIds: Array.from(entry.completedModuleIds),
-  }));
+  const overview = Array.from(byProvider.values()).map((entry) => {
+    const completedCount = entry.completedModuleIds.size;
+    const totalModules = modules.length;
+    return {
+      provider: entry.provider,
+      // "lastActivityAt" descending sort ki wajah se hamesha is provider
+      // ki SABSE NAYI completion ki exact tareekh/waqt hai — agar training
+      // mukammal ho chuki hai, yehi asal mein "completion date" bhi hai.
+      lastActivityAt: entry.lastActivityAt,
+      completedCount,
+      totalModules,
+      completedModuleIds: Array.from(entry.completedModuleIds),
+      status:
+        totalModules > 0 && completedCount >= totalModules
+          ? "completed"
+          : completedCount > 0
+            ? "in_progress"
+            : "not_started",
+    };
+  });
 
   sendResponse(res, {
     statusCode: httpStatus.OK,

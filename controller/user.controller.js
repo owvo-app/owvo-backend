@@ -18,6 +18,71 @@ const getPlatformSettingsDoc = async () =>
     { upsert: true, new: true, setDefaultsOnInsert: true }
   );
 
+/**
+ * UK sort code ke pehle 2 digits se major high-street bank pehchanne ke
+ * liye. Koi live bank API nahi — sirf publicly-known sort code ranges.
+ * Kisi kam-jaani bank ka code na mile to "UK Bank Account" dikha dete hain
+ * (koi ghalat naam nahi dikhate).
+ */
+const UK_SORT_CODE_BANK_PREFIXES = {
+  "04": "HSBC",
+  "08": "Co-operative Bank",
+  "09": "Santander",
+  "16": "Clydesdale Bank",
+  "20": "Barclays",
+  "23": "Metro Bank",
+  "30": "Lloyds Bank",
+  "40": "HSBC",
+  "60": "NatWest",
+  "77": "Bank of Scotland",
+  "80": "TSB",
+  "83": "Nationwide",
+  "87": "Halifax",
+};
+
+const identifyBankFromSortCode = (sortCode) => {
+  const digits = String(sortCode || "").replace(/\D/g, "");
+  if (digits.length !== 6) return "";
+  return UK_SORT_CODE_BANK_PREFIXES[digits.slice(0, 2)] || "UK Bank Account";
+};
+
+/** "12345678" -> "\u2022\u2022\u2022\u2022 5678" */
+const maskAccountNumber = (value) => {
+  const digits = String(value || "").replace(/\D/g, "");
+  if (!digits) return "";
+  return `\u2022\u2022\u2022\u2022 ${digits.slice(-4)}`;
+};
+
+/** "123456" -> "\u2022\u2022-\u2022\u2022-56" */
+const maskSortCode = (value) => {
+  const digits = String(value || "").replace(/\D/g, "");
+  if (digits.length !== 6) return "";
+  return `\u2022\u2022-\u2022\u2022-${digits.slice(4)}`;
+};
+
+/**
+ * Provider ki apni app ko bankDetails bhejte waqt hamesha isay use karo —
+ * asal account number/sort code kabhi wapas nahi jaana chahiye, sirf
+ * masked version aur bank ka naam.
+ */
+const maskBankDetailsForResponse = (bankDetails) => {
+  if (!bankDetails) return bankDetails;
+  const plain =
+    typeof bankDetails.toObject === "function"
+      ? bankDetails.toObject()
+      : bankDetails;
+  return {
+    accountHolderName: plain.accountHolderName || "",
+    address: plain.address || "",
+    city: plain.city || "",
+    postcode: plain.postcode || "",
+    dateOfBirth: plain.dateOfBirth || null,
+    bankName: plain.bankName || "",
+    accountNumberMasked: maskAccountNumber(plain.accountNumber),
+    sortCodeMasked: maskSortCode(plain.sortCode),
+  };
+};
+
 const resolveProviderDailyWashLimitMax = (user, settings) => {
   const providerMax = Number(user?.dailyWashLimitMax);
   if (Number.isInteger(providerMax) && providerMax > 0) return providerMax;
@@ -36,6 +101,7 @@ const buildProfilePayload = async (user) => {
 
   return {
     ...user.toObject(),
+    bankDetails: maskBankDetailsForResponse(user.bankDetails),
     dailyWashLimitMax: resolveProviderDailyWashLimitMax(user, settings),
     completedJobs,
   };
@@ -226,6 +292,13 @@ const drivewayPhotoUploadFields = [
   "drivewayImage",
 ];
 
+const entrancePhotoUploadFields = [
+  "entrancePhoto",
+  "entrancePhotoFile",
+  "entranceImage",
+  "entrancePicture",
+];
+
 const isProviderInsuranceUploadField = (fieldName) =>
   fieldName.includes("insurance") || fieldName.includes("liability");
 
@@ -233,6 +306,9 @@ const isDrivewayPhotoUploadField = (fieldName) =>
   fieldName.includes("driveway") ||
   fieldName.includes("parkingphoto") ||
   fieldName.includes("parkingimage");
+
+const isEntrancePhotoUploadField = (fieldName) =>
+  fieldName.includes("entrance");
 
 export const updateProfile = catchAsync(async (req, res) => {
   const {
@@ -248,6 +324,12 @@ export const updateProfile = catchAsync(async (req, res) => {
     providerCity,
     providerCountry,
     providerPostcode,
+    // Service Location / Driveway — home address se alag, isi se customer
+    // search ki GPS coordinates banti hain.
+    serviceStreetAddress,
+    serviceCity,
+    servicePostcode,
+    sameAsHomeAddress,
     nationalInsuranceNumber,
 
     documentType,
@@ -326,9 +408,59 @@ export const updateProfile = catchAsync(async (req, res) => {
       .filter(Boolean)
       .join(", ");
 
-    if (providerAddressLine) {
-      if (residentialAddress === undefined) user.residentialAddress = providerAddressLine;
-      if (serviceArea === undefined) user.serviceArea = providerAddressLine;
+    // residentialAddress = provider ka apna ghar (display ke liye). Ye ab
+    // "location"/customer search ko kabhi affect nahi karti — sirf
+    // serviceLocationAddress karti hai (neeche).
+    if (providerAddressLine && residentialAddress === undefined) {
+      user.residentialAddress = providerAddressLine;
+    }
+  }
+
+  // ---------------------------
+  // Service Location / Driveway — YE address customer search (GPS) chalati
+  // hai, home address nahi. "Same as home address" ho to home ka postcode
+  // hi copy kar lete hain.
+  // ---------------------------
+  const hasServiceLocationUpdate =
+    serviceStreetAddress !== undefined ||
+    serviceCity !== undefined ||
+    servicePostcode !== undefined ||
+    sameAsHomeAddress !== undefined;
+
+  if (hasServiceLocationUpdate) {
+    if (!user.serviceLocationAddress) user.serviceLocationAddress = {};
+
+    const useHomeAddress = parseBoolean(sameAsHomeAddress) === true;
+    user.serviceLocationAddress.sameAsHomeAddress = useHomeAddress;
+
+    if (useHomeAddress) {
+      user.serviceLocationAddress.streetAddress =
+        user.providerAddress?.streetAddress || "";
+      user.serviceLocationAddress.city = user.providerAddress?.city || "";
+      user.serviceLocationAddress.postcode =
+        user.providerAddress?.postcode || "";
+    } else {
+      if (serviceStreetAddress !== undefined) {
+        user.serviceLocationAddress.streetAddress = serviceStreetAddress;
+      }
+      if (serviceCity !== undefined) {
+        user.serviceLocationAddress.city = serviceCity;
+      }
+      if (servicePostcode !== undefined) {
+        user.serviceLocationAddress.postcode = servicePostcode;
+      }
+    }
+
+    const serviceAddressLine = [
+      user.serviceLocationAddress.streetAddress,
+      user.serviceLocationAddress.city,
+      user.serviceLocationAddress.postcode,
+    ]
+      .filter(Boolean)
+      .join(", ");
+
+    if (serviceAddressLine) {
+      user.serviceArea = serviceAddressLine;
     }
 
     // Postcode se GPS coordinates nikal kar location field mein save kar
@@ -337,9 +469,10 @@ export const updateProfile = catchAsync(async (req, res) => {
     // jaayein customer ko nazar hi nahi aate thay. Ab address submit
     // karte hi search-eligible ho jaate hain. postcodes.io free hai,
     // koi API key nahi chahiye.
-    if (providerPostcode) {
+    const postcodeToGeocode = user.serviceLocationAddress.postcode;
+    if (postcodeToGeocode) {
       try {
-        const cleaned = String(providerPostcode).trim().replace(/\s+/g, "");
+        const cleaned = String(postcodeToGeocode).trim().replace(/\s+/g, "");
         const geoResponse = await fetch(
           `https://api.postcodes.io/postcodes/${encodeURIComponent(cleaned)}`
         );
@@ -363,7 +496,15 @@ export const updateProfile = catchAsync(async (req, res) => {
   if (nationalInsuranceNumber !== undefined) user.nationalInsuranceNumber = nationalInsuranceNumber;
 
   const parsedRightToWorkUK = parseBoolean(rightToWorkUK);
-  if (parsedRightToWorkUK !== undefined) user.rightToWorkUK = parsedRightToWorkUK;
+  if (parsedRightToWorkUK !== undefined) {
+    user.rightToWorkUK = parsedRightToWorkUK;
+    if (parsedRightToWorkUK && !user.rightToWorkConfirmedAt) {
+      user.rightToWorkConfirmedAt = new Date();
+    }
+    if (!parsedRightToWorkUK) {
+      user.rightToWorkConfirmedAt = null;
+    }
+  }
 
   if (dateOfBirth) {
     const age = calculateAge(dateOfBirth);
@@ -452,6 +593,20 @@ export const updateProfile = catchAsync(async (req, res) => {
     user.drivewayPhoto = await uploadProviderDocumentFile(
       drivewayPhotoFile,
       "users/driveway"
+    );
+  }
+
+  // Optional — client ke mutabiq "if required" hi maangi jati hai, koi
+  // completion check isay zaroori nahi banata.
+  const entrancePhotoFile = firstUploadedFile(
+    req.files,
+    entrancePhotoUploadFields,
+    isEntrancePhotoUploadField
+  );
+  if (entrancePhotoFile) {
+    user.entrancePhoto = await uploadProviderDocumentFile(
+      entrancePhotoFile,
+      "users/entrance"
     );
   }
   // ---------------------------
@@ -735,7 +890,7 @@ export const getBankDetails = catchAsync(async (req, res) => {
     success: true,
     message: "Bank details fetched successfully",
     data: {
-      bankDetails: user.bankDetails || {},
+      bankDetails: maskBankDetailsForResponse(user.bankDetails),
       isBankCompleted: user.isBankCompleted,
     },
   });
@@ -760,9 +915,25 @@ export const updateBankDetails = catchAsync(async (req, res) => {
   if (accountHolderName !== undefined)
     user.bankDetails.accountHolderName = accountHolderName;
 
-  if (address !== undefined) user.bankDetails.address = address;
-  if (city !== undefined) user.bankDetails.city = city;
-  if (postcode !== undefined) user.bankDetails.postcode = postcode;
+  // Address/DOB har baar dobara nahi maangte — agar provider ne pehle hi
+  // apni personal details mein bhar diye hain, wahi reuse kar lete hain.
+  if (address !== undefined) {
+    user.bankDetails.address = address;
+  } else if (!user.bankDetails.address && user.providerAddress?.streetAddress) {
+    user.bankDetails.address = user.providerAddress.streetAddress;
+  }
+
+  if (city !== undefined) {
+    user.bankDetails.city = city;
+  } else if (!user.bankDetails.city && user.providerAddress?.city) {
+    user.bankDetails.city = user.providerAddress.city;
+  }
+
+  if (postcode !== undefined) {
+    user.bankDetails.postcode = postcode;
+  } else if (!user.bankDetails.postcode && user.providerAddress?.postcode) {
+    user.bankDetails.postcode = user.providerAddress.postcode;
+  }
 
   if (dateOfBirth) {
     const dob = new Date(dateOfBirth);
@@ -770,12 +941,32 @@ export const updateBankDetails = catchAsync(async (req, res) => {
       throw new AppError(httpStatus.BAD_REQUEST, "Invalid dateOfBirth");
     }
     user.bankDetails.dateOfBirth = dob;
+  } else if (!user.bankDetails.dateOfBirth && user.dateOfBirth) {
+    user.bankDetails.dateOfBirth = user.dateOfBirth;
   }
 
-  if (accountNumber !== undefined)
-    user.bankDetails.accountNumber = accountNumber;
+  if (accountNumber !== undefined) {
+    const digits = String(accountNumber).replace(/\D/g, "");
+    if (digits.length !== 8) {
+      throw new AppError(
+        httpStatus.BAD_REQUEST,
+        "Enter a valid 8-digit account number"
+      );
+    }
+    user.bankDetails.accountNumber = digits;
+  }
 
-  if (sortCode !== undefined) user.bankDetails.sortCode = sortCode;
+  if (sortCode !== undefined) {
+    const digits = String(sortCode).replace(/\D/g, "");
+    if (digits.length !== 6) {
+      throw new AppError(
+        httpStatus.BAD_REQUEST,
+        "Enter a valid 6-digit sort code"
+      );
+    }
+    user.bankDetails.sortCode = digits;
+    user.bankDetails.bankName = identifyBankFromSortCode(digits);
+  }
 
   const bd = user.bankDetails;
   const completed =
@@ -831,7 +1022,7 @@ export const updateBankDetails = catchAsync(async (req, res) => {
     success: true,
     message: "Bank details updated successfully",
     data: {
-      bankDetails: user.bankDetails,
+      bankDetails: maskBankDetailsForResponse(user.bankDetails),
       isBankCompleted: user.isBankCompleted,
     },
   });

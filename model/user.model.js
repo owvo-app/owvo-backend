@@ -191,13 +191,28 @@ const userSchema = new Schema(
     },
 
     residentialAddress: { type: String, trim: true, default: "" },
+    // Provider ka apna ghar ka address — bank/identity verification ke
+    // liye. Customer search yahan se KABHI nahi chalti.
     providerAddress: {
       streetAddress: { type: String, trim: true, default: "" },
       city: { type: String, trim: true, default: "" },
       country: { type: String, trim: true, default: "" },
       postcode: { type: String, trim: true, default: "" },
     },
+    // Jahan customer gaari lekar aata hai — driveway/service location.
+    // "location" (GPS, customer search) hamesha ISI se geocode hoti hai,
+    // "providerAddress" se nahi. Agar sameAsHomeAddress true hai to
+    // providerAddress ke postcode ko hi copy kar lete hain.
+    serviceLocationAddress: {
+      streetAddress: { type: String, trim: true, default: "" },
+      city: { type: String, trim: true, default: "" },
+      postcode: { type: String, trim: true, default: "" },
+      sameAsHomeAddress: { type: Boolean, default: false },
+    },
+    // Abhi self-declaration hai (checkbox) — UK govt Share Code se asal
+    // verification alag, bara kaam hai (naya integration chahiye).
     rightToWorkUK: { type: Boolean, default: false },
+    rightToWorkConfirmedAt: { type: Date, default: null },
 
     isProfileCompleted: { type: Boolean, default: false },
 
@@ -239,6 +254,10 @@ const userSchema = new Schema(
       dateOfBirth: { type: Date },
       accountNumber: { type: String, trim: true, default: "" },
       sortCode: { type: String, trim: true, default: "" },
+      // Sort code ke pehle 2 digits se khud pata chal jata hai (major UK
+      // high-street banks ke liye) — koi bank API nahi, sirf ek chhoti
+      // reference table.
+      bankName: { type: String, trim: true, default: "" },
     },
 
     stripeConnect: {

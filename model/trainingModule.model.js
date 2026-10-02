@@ -8,7 +8,16 @@ import mongoose from "mongoose";
 const trainingModuleSchema = new mongoose.Schema(
   {
     title: { type: String, required: true, trim: true },
+    // Chhota, ek-do line ka description — topics list se alag, card par
+    // title ke neeche dikhta hai.
+    description: { type: String, trim: true, default: "" },
     topics: [{ type: String, trim: true }],
+
+    // Jab is module ka content bohot badal jaye (naya script, naya
+    // topic), admin isay bump kar sakta hai. Provider ki completion
+    // record ke sath yehi version save hota hai, taake admin dekh sake
+    // "ye kis version ke tahat complete hua tha".
+    trainingVersion: { type: String, trim: true, default: "1.0" },
 
     // Cloudinary se aane wali video
     videoUrl: { type: String, required: true },

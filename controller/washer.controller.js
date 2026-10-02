@@ -316,12 +316,21 @@ export const submitTrainingCompletion = catchAsync(async (req, res) => {
     throw new AppError(httpStatus.BAD_REQUEST, "moduleId is required");
   }
 
+  // Module ka ABHI ka trainingVersion save kar dete hain — agar admin
+  // baad mein content significantly badal kar version bump kare, ye
+  // record hamesha bataega "provider ne kis version ke tahat complete
+  // kiya tha".
+  const module = await TrainingModule.findById(moduleId).select(
+    "trainingVersion"
+  );
+
   const record = await ProviderAcceptance.create({
     provider: req.user._id,
     type: "training_module",
     moduleId,
     percentWatched:
       typeof percentWatched === "number" ? percentWatched : 100,
+    version: module?.trainingVersion || "",
     acceptedAt: new Date(),
     device: device || "",
     appVersion: appVersion || "",
@@ -1476,6 +1485,7 @@ export const getTrainingModules = catchAsync(async (req, res) => {
   const result = modules.map((m) => ({
     _id: m._id,
     title: m.title,
+    description: m.description || "",
     topics: m.topics,
     videoUrl: m.videoUrl,
     durationSeconds: m.durationSeconds,
