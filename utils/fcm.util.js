@@ -29,9 +29,17 @@ export const initFcm = () => {
 
   privateKey = privateKey.replace(/\\n/g, "\n");
 
-  admin.initializeApp({
-    credential: admin.credential.cert({ projectId, clientEmail, privateKey }),
-  });
+  try {
+    admin.initializeApp({
+      credential: admin.credential.cert({ projectId, clientEmail, privateKey }),
+    });
+  } catch (e) {
+    console.warn(
+      "[FCM] init failed — push disabled. Check FCM_* env vars:",
+      e?.message || e
+    );
+    return false;
+  }
 
   initialized = true;
   console.log("[FCM] firebase-admin initialised.");
