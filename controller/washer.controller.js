@@ -22,7 +22,6 @@ import { syncProviderCompletedJobs } from "../utils/completedJobs.util.js";
 import catchAsync from "../utils/catch.Async.js";
 import {
   ensureProviderServices,
-  getCurrentCatalogKeys,
   toPlainServices,
 } from "../utils/defaultServices.util.js";
 import {
@@ -1154,7 +1153,7 @@ export const getNearbyWashers = catchAsync(async (req, res) => {
   const providerServices = await Service.find({
     provider: { $in: providerIds },
     isActive: true,
-    catalogKey: { $in: getCurrentCatalogKeys() },
+    catalogKey: { $exists: true, $ne: null },
   })
     .select("provider catalogKey title price serviceType carSize carName carModel description isActive")
     .sort({ price: 1 });

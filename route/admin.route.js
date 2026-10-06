@@ -46,6 +46,8 @@ import {
   updateAdminPayoutStatus,
   updateAdminReportStatus,
   updateAdminCatalogService,
+  createAdminCatalogService,
+  deleteAdminCatalogService,
   updateAdminProviderService,
   updateAdminMe,
   updateDashboardSettings,
@@ -61,6 +63,12 @@ import {
   getAdminDataRequests,
   updateAdminDataRequest,
 } from "../controller/dataRequest.controller.js";
+import {
+  getAdminAddons,
+  createAdminAddon,
+  updateAdminAddon,
+  deleteAdminAddon,
+} from "../controller/addon.controller.js";
 
 const router = express.Router();
 
@@ -80,9 +88,16 @@ router.get("/reports", protect, hasDashboardMenu("reports"), getAdminReports);
 router.get("/reports/:reportId/photo", protect, hasDashboardMenu("reports"), getAdminReportPhoto);
 router.patch("/reports/:reportId/status", protect, isAdmin, updateAdminReportStatus);
 router.get("/services-pricing", protect, hasDashboardMenu("reports"), getAdminServicesPricing);
+router.post("/services-pricing/catalog", protect, isAdmin, createAdminCatalogService);
 router.patch("/services-pricing/catalog/:serviceId", protect, isAdmin, updateAdminCatalogService);
+router.delete("/services-pricing/catalog/:serviceId", protect, isAdmin, deleteAdminCatalogService);
 router.patch("/services-pricing/providers/:providerId/services/:serviceId", protect, isAdmin, updateAdminProviderService);
 router.patch("/services-pricing/providers/:providerId/daily-wash-limit", protect, isAdmin, updateProviderDailyWashLimit);
+
+router.get("/addons", protect, hasDashboardMenu("reports"), getAdminAddons);
+router.post("/addons", protect, isAdmin, createAdminAddon);
+router.patch("/addons/:addonId", protect, isAdmin, updateAdminAddon);
+router.delete("/addons/:addonId", protect, isAdmin, deleteAdminAddon);
 
 router.get("/payments", protect, hasDashboardMenu("payouts-payments"), getAdminPayments);
 router.get("/earnings", protect, hasDashboardMenu("earnings"), getAdminEarnings);

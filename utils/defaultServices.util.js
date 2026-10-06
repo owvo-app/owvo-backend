@@ -63,12 +63,9 @@ const globalServiceFilter = {
   $or: [{ provider: null }, { provider: { $exists: false } }],
 };
 
-const currentCatalogKeys = defaultServices.map((service) => service.catalogKey);
 const defaultServicesByCatalogKey = new Map(
   defaultServices.map((service) => [service.catalogKey, service])
 );
-
-export const getCurrentCatalogKeys = () => [...currentCatalogKeys];
 
 export const findDefaultServiceForPayload = (payload = {}) => {
   if (payload.catalogKey && defaultServicesByCatalogKey.has(payload.catalogKey)) {
@@ -90,57 +87,25 @@ export const toPlainServices = (services) =>
     typeof service?.toObject === "function" ? service.toObject() : service
   );
 
+// The catalog is DB-driven (admins can add/remove services). The hardcoded
+// defaults are only seeded on a completely fresh database — never re-seeded,
+// so deleting a service (even a default one) is permanent.
 export const ensureDefaultServices = async () => {
-  await Service.updateMany(
-    {
-      ...globalServiceFilter,
-      catalogKey: { $exists: true, $nin: currentCatalogKeys },
-    },
-    { $set: { isActive: false } }
-  );
+  const catalogCount = await Service.countDocuments(globalServiceFilter);
 
-  for (const defaultService of defaultServices) {
-    let service = await Service.findOne({
-      catalogKey: defaultService.catalogKey,
-      ...globalServiceFilter,
-    });
-
-    service ??= await Service.findOne({
-      title: defaultService.title,
-      serviceType: defaultService.serviceType,
-      ...globalServiceFilter,
-    });
-
-    if (service) {
-      service.catalogKey = service.catalogKey || defaultService.catalogKey;
-      service.serviceType = service.serviceType || defaultService.serviceType;
-      service.title = service.title || defaultService.title;
-      service.price = service.price || defaultService.price;
-      service.carSize = service.carSize || defaultService.carSize;
-      service.carName = service.carName || defaultService.carName;
-      service.carModel = service.carModel || defaultService.carModel;
-      service.description = service.description || defaultService.description;
-      service.isActive = service.isActive !== false;
-      service.provider = null;
-      await service.save();
-    } else {
-      await Service.create({ ...defaultService, provider: null });
-    }
+  if (catalogCount === 0) {
+    await Service.insertMany(
+      defaultServices.map((service) => ({ ...service, provider: null }))
+    );
   }
 
-  return Service.find({
-    catalogKey: { $in: currentCatalogKeys },
-    ...globalServiceFilter,
-  }).sort({
-    price: 1,
-  });
+  return Service.find(globalServiceFilter).sort({ price: 1 });
 };
 
 export const syncProviderPreferredServices = async (providerId) => {
   const activeServices = await Service.find({
     provider: providerId,
     isActive: true,
-    catalogKey: { $in: currentCatalogKeys },
   }).select("_id");
 
   await User.findByIdAndUpdate(providerId, {
@@ -151,36 +116,39 @@ export const syncProviderPreferredServices = async (providerId) => {
 };
 
 export const ensureProviderServices = async (providerId) => {
-  const defaultCatalog = await ensureDefaultServices();
+  const catalog = await ensureDefaultServices();
   const catalogByKey = new Map(
-    defaultCatalog.map((service) => [service.catalogKey, service])
+    catalog.map((service) => [service.catalogKey, service])
   );
+  const catalogKeys = [...catalogByKey.keys()].filter(Boolean);
+
   let providerServices = await Service.find({ provider: providerId }).sort({
     price: 1,
   });
 
+  // Retire copies of catalog services that no longer exist.
   await Service.updateMany(
     {
       provider: providerId,
-      catalogKey: { $exists: true, $nin: currentCatalogKeys },
+      catalogKey: { $exists: true, $nin: catalogKeys },
     },
     { $set: { isActive: false } }
   );
 
   for (const providerService of providerServices) {
-    const defaultService =
+    const catalogService =
       catalogByKey.get(providerService.catalogKey) ||
       findDefaultServiceForPayload(providerService);
-    if (!defaultService) continue;
+    if (!catalogService) continue;
 
     const fixedFields = {
-      serviceType: defaultService.serviceType,
-      title: defaultService.title,
-      price: defaultService.price,
-      carSize: defaultService.carSize,
-      carName: defaultService.carName,
-      carModel: defaultService.carModel,
-      description: defaultService.description,
+      serviceType: catalogService.serviceType,
+      title: catalogService.title,
+      price: catalogService.price,
+      carSize: catalogService.carSize,
+      carName: catalogService.carName,
+      carModel: catalogService.carModel,
+      description: catalogService.description,
     };
 
     let changed = false;
@@ -199,17 +167,17 @@ export const ensureProviderServices = async (providerId) => {
   const existingCatalogKeys = new Set(
     providerServices
       .map((service) => service.catalogKey)
-      .filter((catalogKey) => currentCatalogKeys.includes(catalogKey))
+      .filter((catalogKey) => catalogKeys.includes(catalogKey))
   );
 
-  const missingDefaults = defaultCatalog.filter(
+  const missingServices = catalog.filter(
     (service) =>
       service.catalogKey && !existingCatalogKeys.has(service.catalogKey)
   );
 
-  if (missingDefaults.length > 0) {
+  if (missingServices.length > 0) {
     const clonedServices = await Service.insertMany(
-      missingDefaults.map((service) => ({
+      missingServices.map((service) => ({
         catalogKey: service.catalogKey,
         serviceType: service.serviceType,
         title: service.title,
@@ -230,6 +198,6 @@ export const ensureProviderServices = async (providerId) => {
 
   return Service.find({
     provider: providerId,
-    catalogKey: { $in: currentCatalogKeys },
+    catalogKey: { $in: catalogKeys },
   }).sort({ price: 1 });
 };

@@ -14,6 +14,7 @@ import paymentRoutes from "../route/payment.route.js";
 import chatRoutes from "../route/chat.route.js";
 import userRatingRoutes from "../route/userRating.route.js";
 import issueReportRoutes from "../route/issueReport.route.js";
+import addonRoutes from "../route/addon.route.js";
 
 const router = express.Router();
 
@@ -31,5 +32,6 @@ router.use("/rating", ratingRoutes);
 router.use("/chat", chatRoutes);
 router.use("/user-rating", userRatingRoutes);
 router.use("/reports", issueReportRoutes);
+router.use("/addons", addonRoutes);
 
 export default router;

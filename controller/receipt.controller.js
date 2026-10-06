@@ -44,7 +44,8 @@ export const generateReceipt = catchAsync(async (req, res) => {
     });
   }
 
-  const subtotal = Number(booking.price || 0);
+  const subtotal =
+    Number(booking.price || 0) + Number(booking.addonsTotal || 0);
   const discount = Number(booking.discountPrice || 0);
 
   const afterDiscount = Math.max(0, subtotal - discount);

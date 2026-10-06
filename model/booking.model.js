@@ -34,6 +34,26 @@ const bookingSchema = new mongoose.Schema(
       type: Number,
       required: true,
     },
+    addons: [
+      {
+        addon: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "Addon",
+        },
+        name: {
+          type: String,
+          default: "",
+        },
+        price: {
+          type: Number,
+          default: 0,
+        },
+      },
+    ],
+    addonsTotal: {
+      type: Number,
+      default: 0,
+    },
     discountPrice: {
       type: Number,
       default: 0,

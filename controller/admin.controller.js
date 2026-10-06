@@ -1279,6 +1279,185 @@ export const updateAdminCatalogService = catchAsync(async (req, res) => {
   });
 });
 
+const SERVICE_TYPES = ["basic", "standard", "premium"];
+const CAR_SIZES = ["small", "medium", "high"];
+
+const slugifyCatalogKey = (title) =>
+  title
+    .toString()
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "service";
+
+const buildUniqueCatalogKey = async (title) => {
+  const base = slugifyCatalogKey(title);
+  let catalogKey = base;
+  let suffix = 2;
+
+  while (
+    await Service.exists({ catalogKey, ...globalServiceFilter })
+  ) {
+    catalogKey = `${base}-${suffix}`;
+    suffix += 1;
+  }
+
+  return catalogKey;
+};
+
+const propagateCatalogToProviders = async () => {
+  const providers = await User.find({ role: "provider" }).select("_id").lean();
+  await Promise.all(
+    providers.map((provider) => ensureProviderServices(provider._id))
+  );
+};
+
+export const createAdminCatalogService = catchAsync(async (req, res) => {
+  const {
+    title,
+    serviceType,
+    price,
+    carSize,
+    carName,
+    carModel,
+    description,
+    isActive,
+  } = req.body ?? {};
+
+  const normalizedTitle = title?.toString().trim();
+  if (!normalizedTitle) {
+    throw new AppError(httpStatus.BAD_REQUEST, "Service title is required");
+  }
+  if (!SERVICE_TYPES.includes(serviceType)) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      `serviceType must be one of: ${SERVICE_TYPES.join(", ")}`
+    );
+  }
+  if (!CAR_SIZES.includes(carSize)) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      `carSize must be one of: ${CAR_SIZES.join(", ")}`
+    );
+  }
+
+  const normalizedPrice = asMoney(price);
+  if (!Number.isFinite(normalizedPrice) || normalizedPrice <= 0) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "Service price must be greater than 0"
+    );
+  }
+
+  const catalogKey = await buildUniqueCatalogKey(normalizedTitle);
+
+  const service = await Service.create({
+    provider: null,
+    catalogKey,
+    serviceType,
+    title: normalizedTitle,
+    price: normalizedPrice,
+    carSize,
+    carName: carName?.toString().trim() || "Any car",
+    carModel: carModel?.toString().trim() || "Any model",
+    description: description?.toString().trim() || "",
+    isActive: isActive === undefined ? true : Boolean(isActive),
+  });
+
+  await propagateCatalogToProviders();
+
+  await recordActivity({
+    req,
+    action: "service_catalog.created",
+    entityType: "service",
+    entityId: service._id,
+    metadata: {
+      catalogKey: service.catalogKey,
+      title: service.title,
+      price: service.price,
+    },
+  });
+
+  broadcast("admin_services_pricing_updated", {
+    serviceId: service._id,
+    catalogKey: service.catalogKey,
+  });
+
+  sendResponse(res, {
+    statusCode: httpStatus.CREATED,
+    success: true,
+    message: "Catalog service created successfully",
+    data: service,
+  });
+});
+
+export const deleteAdminCatalogService = catchAsync(async (req, res) => {
+  const { serviceId } = req.params;
+  const service = await Service.findOne({
+    _id: serviceId,
+    ...globalServiceFilter,
+  });
+
+  if (!service) {
+    throw new AppError(httpStatus.NOT_FOUND, "Catalog service not found");
+  }
+
+  const catalogKey = service.catalogKey;
+  const deletedTitle = service.title;
+
+  await Service.deleteOne({ _id: service._id });
+
+  let providerCopiesRemoved = 0;
+  let affectedProviderIds = [];
+  if (catalogKey) {
+    const providerCopies = await Service.find({
+      catalogKey,
+      provider: { $ne: null },
+    }).select("provider");
+    affectedProviderIds = [
+      ...new Set(
+        providerCopies.map((copy) => copy.provider?.toString()).filter(Boolean)
+      ),
+    ];
+    const result = await Service.deleteMany({
+      catalogKey,
+      provider: { $ne: null },
+    });
+    providerCopiesRemoved = result.deletedCount || 0;
+  }
+
+  await Promise.all(
+    affectedProviderIds.map((providerId) =>
+      syncProviderPreferredServices(providerId)
+    )
+  );
+
+  await recordActivity({
+    req,
+    action: "service_catalog.deleted",
+    entityType: "service",
+    entityId: service._id,
+    metadata: {
+      catalogKey,
+      title: deletedTitle,
+      providerCopiesRemoved,
+    },
+  });
+
+  broadcast("admin_services_pricing_updated", {
+    serviceId: service._id,
+    catalogKey,
+    deleted: true,
+  });
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Catalog service deleted successfully",
+    data: null,
+  });
+});
+
 export const updateAdminProviderService = catchAsync(async (req, res) => {
   const { providerId, serviceId } = req.params;
   const service = await Service.findOne({

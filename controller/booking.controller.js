@@ -1,5 +1,7 @@
 import httpStatus from "http-status";
+import mongoose from "mongoose";
 import AppError from "../errors/AppError.js";
+import { Addon } from "../model/addon.model.js";
 import { Booking } from "../model/booking.model.js";
 import { Coupon } from "../model/coupon.model.js";
 import { Receipt } from "../model/receipt.model.js";
@@ -10,7 +12,6 @@ import { broadcast, emitToUser } from "../socket/socket.js";
 import { isProviderAvailableNow } from "../utils/availability.util.js";
 import { syncProviderCompletedJobs } from "../utils/completedJobs.util.js";
 import catchAsync from "../utils/catch.Async.js";
-import { getCurrentCatalogKeys } from "../utils/defaultServices.util.js";
 import { refreshProviderBusyState } from "../utils/providerBusy.util.js";
 import sendResponse from "../utils/sendResponse.js";
 
@@ -53,6 +54,7 @@ export const createBooking = catchAsync(async (req, res) => {
     provider,
     service,
     couponCode,
+    addonIds,
     address,
     bookingDate,
     payment,
@@ -102,7 +104,7 @@ export const createBooking = catchAsync(async (req, res) => {
   const bookedService = await Service.findOne({
     _id: service,
     isActive: true,
-    catalogKey: { $in: getCurrentCatalogKeys() },
+    catalogKey: { $exists: true, $ne: null },
   })
     .select("_id provider catalogKey title price serviceType carSize carName carModel description")
     .lean();
@@ -133,8 +135,53 @@ export const createBooking = catchAsync(async (req, res) => {
     throw new AppError(httpStatus.BAD_REQUEST, "Invalid service price");
   }
 
+  // Add-ons are priced server-side from the DB — client prices are never trusted.
+  let selectedAddons = [];
+  let addonsTotal = 0;
+
+  if (addonIds !== undefined && addonIds !== null) {
+    if (!Array.isArray(addonIds)) {
+      throw new AppError(httpStatus.BAD_REQUEST, "addonIds must be an array");
+    }
+
+    const uniqueAddonIds = [
+      ...new Set(addonIds.map((id) => id?.toString()).filter(Boolean)),
+    ];
+
+    if (uniqueAddonIds.some((id) => !mongoose.Types.ObjectId.isValid(id))) {
+      throw new AppError(
+        httpStatus.BAD_REQUEST,
+        "One or more selected add-ons are not available"
+      );
+    }
+
+    if (uniqueAddonIds.length > 0) {
+      selectedAddons = await Addon.find({
+        _id: { $in: uniqueAddonIds },
+        isActive: true,
+      })
+        .select("_id name price")
+        .lean();
+
+      if (selectedAddons.length !== uniqueAddonIds.length) {
+        throw new AppError(
+          httpStatus.BAD_REQUEST,
+          "One or more selected add-ons are not available"
+        );
+      }
+
+      addonsTotal =
+        Math.round(
+          selectedAddons.reduce((sum, addon) => sum + Number(addon.price), 0) *
+            100
+        ) / 100;
+    }
+  }
+
+  const subtotal = price + addonsTotal;
+
   let discountPrice = 0;
-  let finalPrice = price;
+  let finalPrice = subtotal;
   let appliedCoupon = null;
 
   
@@ -199,8 +246,8 @@ export const createBooking = catchAsync(async (req, res) => {
       );
     }
 
-    discountPrice = (price * coupon.discountPercentage) / 100;
-    finalPrice = price - discountPrice;
+    discountPrice = (subtotal * coupon.discountPercentage) / 100;
+    finalPrice = subtotal - discountPrice;
     if (finalPrice < 0) finalPrice = 0;
 
     appliedCoupon = coupon._id;
@@ -211,6 +258,12 @@ export const createBooking = catchAsync(async (req, res) => {
     provider,
     service,
     price,
+    addons: selectedAddons.map((addon) => ({
+      addon: addon._id,
+      name: addon.name,
+      price: addon.price,
+    })),
+    addonsTotal,
     vehicle: bookingVehicle?._id || null,
     vehicleSnapshot,
     coupon: appliedCoupon,
@@ -687,7 +740,7 @@ export const rebookBooking = catchAsync(async (req, res) => {
   const currentService = await Service.findOne({
     _id: service,
     isActive: true,
-    catalogKey: { $in: getCurrentCatalogKeys() },
+    catalogKey: { $exists: true, $ne: null },
   })
     .select("_id provider price")
     .lean();
