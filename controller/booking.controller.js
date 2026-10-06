@@ -9,6 +9,7 @@ import { Service } from "../model/service.model.js";
 import { User } from "../model/user.model.js";
 import { Vehicle } from "../model/vehicle.model.js";
 import { broadcast, emitToUser } from "../socket/socket.js";
+import { notifyUser } from "../utils/fcm.util.js";
 import { isProviderAvailableNow } from "../utils/availability.util.js";
 import { syncProviderCompletedJobs } from "../utils/completedJobs.util.js";
 import catchAsync from "../utils/catch.Async.js";
@@ -336,9 +337,24 @@ export const createBooking = catchAsync(async (req, res) => {
     price: booking.price,
     finalPrice: booking.finalPrice,
     discount: booking.discountPrice,
+    addons: (booking.addons || []).map((a) => ({
+      name: a.name,
+      price: a.price,
+    })),
+    addonsTotal: booking.addonsTotal || 0,
     currency: booking.currency,
     payment: booking.payment,
     message: "You have a new booking request!",
+  });
+
+  // 🔔 Push: new booking request → provider
+  notifyUser(provider.toString(), {
+    title: "New booking request!",
+    body: `${customerPayload.name || "A customer"} requested ${bookedService?.title || "a wash"} — £${booking.finalPrice}`,
+    data: {
+      type: "new_booking_request",
+      bookingId: booking._id.toString(),
+    },
   });
 
   broadcast("admin_booking_created", toAdminBookingPayload(booking, {
@@ -682,6 +698,13 @@ export const cancelBooking = catchAsync(async (req, res) => {
     bookingId: booking._id,
     status: "cancelled",
     message: "A booking has been cancelled by the user.",
+  });
+
+  // 🔔 Push: cancelled by customer → provider
+  notifyUser(booking.provider.toString(), {
+    title: "Booking cancelled",
+    body: "A booking was cancelled by the customer.",
+    data: { type: "booking_cancelled", bookingId: booking._id.toString() },
   });
 
   sendResponse(res, {

@@ -9,6 +9,7 @@ import globalErrorHandler from "./middleware/globalErrorHandler.js";
 import { securityHeaders, simpleRateLimit } from "./middleware/security.middleware.js";
 import notFound from "./middleware/notFound.js";
 import { initSocket } from "./socket/socket.js";
+import { initFcm } from "./utils/fcm.util.js";
 import { ensureUserIndexes } from "./utils/userIndexes.util.js";
 import { corsOriginDelegate } from "./utils/allowedOrigins.util.js";
 import { validateAuthConfiguration } from "./utils/authToken.js";
@@ -25,6 +26,9 @@ const server = createServer(app);
 
 // ✅ Initialise Socket.io (must come before server.listen)
 initSocket(server);
+
+// ✅ Initialise Firebase Cloud Messaging (silent no-op without FCM_* env vars)
+initFcm();
 
 app.use(securityHeaders);
 app.use(simpleRateLimit());

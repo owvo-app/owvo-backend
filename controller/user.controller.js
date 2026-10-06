@@ -1185,3 +1185,61 @@ export const getUserActivity = catchAsync(async (req, res) => {
     },
   });
 });
+/**
+ * Save / refresh the device's FCM push token.
+ * Body: { token: string, platform: 'android' | 'ios' | 'web' }
+ * Called by the app on login and on token refresh.
+ */
+export const saveFcmToken = catchAsync(async (req, res) => {
+  const { token, platform } = req.body || {};
+
+  if (!token || typeof token !== "string" || token.trim().length < 10) {
+    throw new AppError(httpStatus.BAD_REQUEST, "A valid FCM token is required");
+  }
+
+  const cleanPlatform = ["android", "ios", "web"].includes(platform)
+    ? platform
+    : "android";
+
+  // Remove any existing entry for this token, then push a fresh one.
+  await User.updateOne(
+    { _id: req.user._id },
+    { $pull: { fcmTokens: { token: token.trim() } } }
+  );
+  await User.updateOne(
+    { _id: req.user._id },
+    {
+      $push: {
+        fcmTokens: {
+          token: token.trim(),
+          platform: cleanPlatform,
+          updatedAt: new Date(),
+        },
+      },
+    }
+  );
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Push token saved",
+    data: null,
+  });
+});
+
+/** Remove an FCM token (call on logout). Body: { token: string } */
+export const removeFcmToken = catchAsync(async (req, res) => {
+  const { token } = req.body || {};
+  if (token) {
+    await User.updateOne(
+      { _id: req.user._id },
+      { $pull: { fcmTokens: { token: token.toString().trim() } } }
+    );
+  }
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Push token removed",
+    data: null,
+  });
+});

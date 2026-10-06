@@ -350,6 +350,24 @@ const userSchema = new Schema(
       allTime: { type: Number, default: 0 },
       syncedAt: { type: Date },
     },
+
+    // Push notification device tokens (Firebase Cloud Messaging).
+    // One entry per device — refreshed by the app on login/token refresh.
+    fcmTokens: {
+      type: [
+        {
+          token: { type: String, required: true },
+          platform: {
+            type: String,
+            enum: ["android", "ios", "web"],
+            default: "android",
+          },
+          updatedAt: { type: Date, default: Date.now },
+          _id: false,
+        },
+      ],
+      default: [],
+    },
   },
   { timestamps: true }
 );

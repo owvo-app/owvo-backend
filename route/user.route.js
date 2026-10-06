@@ -3,6 +3,8 @@ import {
   changePassword,
   getBankDetails,
   getProfile,
+  removeFcmToken,
+  saveFcmToken,
   updateBankDetails,
   updateIdentityInfo,
   updateProfile,
@@ -45,6 +47,8 @@ router.put("/identity/upload-id",protect,upload.array("idFile", 5),uploadIdentit
 router.get("/bank", protect, getBankDetails);
 router.put("/bank", protect, updateBankDetails);
 router.get("/activity", protect, getUserActivity);
+router.post("/fcm-token", protect, saveFcmToken);
+router.delete("/fcm-token", protect, removeFcmToken);
 router.post("/data-requests", protect, createDataRequest);
 router.get("/data-requests", protect, getMyDataRequests);
 router.delete("/account", protect, deleteMyAccount);

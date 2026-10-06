@@ -211,6 +211,30 @@ export const initSocket = (httpServer) => {
       emitToUser(recipientId, "chat_message", message);
       emitToUser(senderId, "chat_message", message);
 
+      // 🔔 Push: new chat message → recipient (skip if they're in the app)
+      if (!isUserConnected(recipientId)) {
+        try {
+          const { User } = await import("../model/user.model.js");
+          const { notifyUser } = await import("../utils/fcm.util.js");
+          const sender = await User.findById(senderId)
+            .select("name")
+            .lean();
+          const preview =
+            text.length > 80 ? `${text.slice(0, 80)}…` : text;
+          notifyUser(recipientId, {
+            title: `New message from ${sender?.name || "Owvo"}`,
+            body: preview,
+            data: {
+              type: "chat_message",
+              bookingId: bookingId || "",
+              senderId,
+            },
+          });
+        } catch (e) {
+          socketErrorLog("chat push failed", e?.message || e);
+        }
+      }
+
       if (typeof ack === "function") {
         ack({ success: true, data: message });
       }
@@ -251,6 +275,12 @@ export const emitToUser = (userId, event, data) => {
 export const broadcast = (event, data) => {
   if (!io) return;
   io.emit(event, data);
+};
+
+/** True when the user has at least one active socket connection. */
+export const isUserConnected = (userId) => {
+  const key = normalizeUserId(userId);
+  return !!connectedUsers.get(key)?.size;
 };
 
 export default { initSocket, getIO, emitToUser, broadcast };

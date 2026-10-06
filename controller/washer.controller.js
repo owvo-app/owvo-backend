@@ -14,6 +14,7 @@ import { PlatformSetting } from "../model/platformSetting.model.js";
 import { Payout } from "../model/payout.model.js";
 import { sendEmail } from "../utils/sendEmail.js";
 import { broadcast, emitToUser } from "../socket/socket.js";
+import { notifyUser } from "../utils/fcm.util.js";
 import {
   isProviderAvailableNow,
   normalizeAvailability,
@@ -629,6 +630,38 @@ export const acceptBooking = catchAsync(async (req, res) => {
       arrivedAt: booking.arrivedAt,
       washEndsAt: booking.washEndsAt,
       message: "Your booking has been accepted! The washer is on the way.",
+    });
+  }
+
+  // 🔔 Push: booking status changes → customer
+  const pushMessages = {
+    accepted: {
+      title: "Booking accepted!",
+      body: `${washer.name || "Your washer"} is on the way.`,
+    },
+    arrived: {
+      title: "Your washer has arrived",
+      body: `${washer.name || "Your washer"} is at your location.`,
+    },
+    ongoing: {
+      title: "Wash started!",
+      body: "Your car wash has started.",
+    },
+    completed: {
+      title: "Wash complete!",
+      body: "Your car wash is complete. Please rate your experience.",
+    },
+    cancelled: {
+      title: "Booking cancelled",
+      body: providerCancellationMessage,
+    },
+  };
+  const push = pushMessages[status];
+  if (push) {
+    notifyUser(bookingUserId, {
+      title: push.title,
+      body: push.body,
+      data: { type: `booking_${status}`, bookingId: booking._id.toString() },
     });
   }
 
