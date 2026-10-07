@@ -3,6 +3,7 @@ import { Booking } from "../model/booking.model.js";
 import { paymentInfo } from "../model/payment.model.js";
 import { User } from "../model/user.model.js";
 import { emitToUser } from "../socket/socket.js";
+import { notifyUser } from "../utils/fcm.util.js";
 
 const getStripe = () =>
   new Stripe(process.env.STRIPE_SECRET_KEY, {
@@ -74,15 +75,27 @@ const updateBookingAsPaid = async (paymentRecord, transactionId) => {
   await booking.save();
 
   if (!wasPaid && booking.provider?._id) {
+    const amount = paymentRecord.price;
+    const currency = paymentRecord.currency || "GBP";
+    const symbol = currency === "GBP" ? "£" : `${currency} `;
     emitToUser(booking.provider._id.toString(), "booking_payment_confirmed", {
       bookingId: booking._id.toString(),
       status: booking.status,
       paymentStatus: "paid",
-      amount: paymentRecord.price,
-      currency: paymentRecord.currency || "GBP",
+      amount,
+      currency,
       userId: booking.user?._id?.toString(),
       userName: booking.user?.name,
       message: "The user has paid for this booking.",
+    });
+    // Push too — socket alone won't reach a closed app.
+    notifyUser(booking.provider._id.toString(), {
+      title: "Payment received!",
+      body: `${booking.user?.name || "The customer"} has paid ${symbol}${amount} for this booking.`,
+      data: {
+        type: "payment_confirmed",
+        bookingId: booking._id.toString(),
+      },
     });
   }
 };
@@ -122,6 +135,16 @@ const addTipToProviderBalance = async (paymentRecord) => {
     userId: booking?.user?._id?.toString() || paymentRecord.userId?.toString(),
     userName: customerName,
     message: `${customerName} sent you ${currency} ${amount.toFixed(2)} as a tip.`,
+  });
+
+  // 🔔 Push too — socket alone won't reach a closed app.
+  notifyUser(providerId.toString(), {
+    title: "Tip received! 🎉",
+    body: `${customerName} sent you ${currency === "GBP" ? "£" : currency + " "}${amount.toFixed(2)} as a tip.`,
+    data: {
+      type: "tip_received",
+      bookingId: booking?._id?.toString() || paymentRecord.bookingId?.toString() || "",
+    },
   });
 };
 

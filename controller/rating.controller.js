@@ -5,6 +5,7 @@ import { Booking } from "../model/booking.model.js";
 import { Rating } from "../model/rating.model.js";
 import catchAsync from "../utils/catch.Async.js";
 import sendResponse from "../utils/sendResponse.js";
+import { notifyUser } from "../utils/fcm.util.js";
     
 
 export const createRating = catchAsync(async (req, res) => {
@@ -54,6 +55,22 @@ export const createRating = catchAsync(async (req, res) => {
   if (booking.isRated !== true) {
     booking.isRated = true;
     await booking.save();
+  }
+
+  // 🔔 Push to provider — they otherwise never know they were rated.
+  if (booking.provider) {
+    notifyUser(booking.provider.toString(), {
+      title: `You got a ${ratingValue}-star rating! ⭐`,
+      body:
+        doc.review && doc.review.trim()
+          ? `"${doc.review.trim()}"`
+          : "A customer rated your service.",
+      data: {
+        type: "rating_received",
+        bookingId: booking._id.toString(),
+        rating: String(ratingValue),
+      },
+    });
   }
 
   sendResponse(res, {

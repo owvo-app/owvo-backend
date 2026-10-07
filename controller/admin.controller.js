@@ -23,6 +23,7 @@ import { TrainingModule } from "../model/trainingModule.model.js";
 import { Notification } from "../model/notification.model.js";
 import { uploadOnCloudinary } from "../utils/common.Method.js";
 import { emitToUser, broadcast } from "../socket/socket.js";
+import { notifyUser } from "../utils/fcm.util.js";
 import { refreshProviderBusyState } from "../utils/providerBusy.util.js";
 import {
   emptyCompletedJobs,
@@ -1044,6 +1045,18 @@ export const updateProviderVerification = catchAsync(async (req, res) => {
     notes: provider.adminVerification.notes,
     reviewedAt: provider.adminVerification.reviewedAt,
   });
+
+  // 🔔 Push too — socket alone won't reach a closed app.
+  if (status === "approved" || status === "rejected") {
+    notifyUser(provider._id.toString(), {
+      title:
+        status === "approved"
+          ? "Verification approved! 🎉"
+          : "Verification rejected",
+      body: verificationMessage,
+      data: { type: "verification_update", status },
+    });
+  }
 
   // Turant (live) socket event sirf tab kaam karta hai jab provider us
   // waqt app mein ho. Isay bhi save kar dete hain taake agar wo offline
@@ -2254,6 +2267,22 @@ export const updateAdminPayoutStatus = catchAsync(async (req, res) => {
     metadata: { status, failureReason },
   });
   broadcast("admin_payout_updated", { payoutId: payout._id, status: payout.status });
+
+  // 🔔 Push to provider when payout is paid or failed.
+  if ((status === "paid" || status === "failed") && payout.provider) {
+    notifyUser(payout.provider.toString(), {
+      title: status === "paid" ? "Payout sent! 💸" : "Payout failed",
+      body:
+        status === "paid"
+          ? `Your payout of £${payout.amount} has been sent.`
+          : `Your payout of £${payout.amount} could not be processed.${payout.failureReason ? ` Reason: ${payout.failureReason}` : ""}`,
+      data: {
+        type: "payout_update",
+        payoutId: payout._id.toString(),
+        status,
+      },
+    });
+  }
 
   sendResponse(res, {
     statusCode: httpStatus.OK,
