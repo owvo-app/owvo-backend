@@ -672,6 +672,69 @@ export const acceptBooking = catchAsync(async (req, res) => {
   });
 });
 
+/**
+ * POST /api/v1/washers/decline/:bookingId
+ * Provider declines an incoming (pending) booking request.
+ * Customer gets a socket event + push notification.
+ */
+export const declineBooking = catchAsync(async (req, res) => {
+  const washer = await User.findById(req.user._id);
+
+  if (!washer || washer.role !== "provider") {
+    throw new AppError(httpStatus.NOT_FOUND, "Washer not found");
+  }
+
+  const booking = await Booking.findById(req.params.bookingId).populate(
+    "user",
+    "_id name"
+  );
+
+  if (!booking) {
+    throw new AppError(httpStatus.NOT_FOUND, "Booking not found");
+  }
+
+  if (booking.provider.toString() !== washer._id.toString()) {
+    throw new AppError(httpStatus.FORBIDDEN, "You cannot update this booking");
+  }
+
+  if (booking.status !== "pending") {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "Only pending bookings can be declined"
+    );
+  }
+
+  booking.status = "declined";
+  booking.cancelledBy = "provider";
+  booking.cancelledAt = new Date();
+  await booking.save();
+
+  const bookingUserId =
+    booking.user?._id?.toString?.() || booking.user?.toString();
+
+  // ✅ Real-time: tell the customer the request was declined
+  emitToUser(bookingUserId, "booking_declined", {
+    bookingId: booking._id.toString(),
+    status: "declined",
+    washerId: washer._id.toString(),
+    washerName: washer.name,
+    message: "The washer declined your booking request.",
+  });
+
+  // 🔔 Push: declined by provider → customer (socket alone won't reach a closed app)
+  notifyUser(bookingUserId, {
+    title: "Booking declined",
+    body: `${washer.name || "The washer"} declined your booking request. Please choose another washer.`,
+    data: { type: "booking_declined", bookingId: booking._id.toString() },
+  });
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Booking declined",
+  });
+});
+
 export const completeWash = catchAsync(async (req, res) => {
   const booking = await Booking.findById(req.params.bookingId);
 

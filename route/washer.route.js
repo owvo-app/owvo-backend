@@ -2,6 +2,7 @@ import express from "express";
 import {
   acceptWasherPolicies,
   acceptBooking,
+  declineBooking,
   addPreferredService,
   completeWash,
   getAllWashers,
@@ -64,6 +65,7 @@ router.put("/availability", protect, updateWasherAvailability);
 router.post("/online", protect, goOnline);
 router.post("/offline", protect, goOffline);
 router.post("/accept/:bookingId", protect, acceptBooking);
+router.post("/decline/:bookingId", protect, declineBooking);
 router.post("/complete/:bookingId", protect, completeWash);
 
 /**
