@@ -7,6 +7,7 @@ import {
   updateBookingStatus,
   cancelBooking,
   rebookBooking,
+  updateCustomerLocation,
 } from "../controller/booking.controller.js";
 
 import { protect } from "../middleware/auth.middleware.js";
@@ -19,6 +20,7 @@ router.get("/provider-bookings", protect, getProviderBookings);
 router.post("/:id/rebook", protect, rebookBooking);
 router.patch("/:id/status", protect, updateBookingStatus);
 router.patch("/:id/cancel", protect, cancelBooking);
+router.patch("/:id/customer-location", protect, updateCustomerLocation);
 router.get("/:id", protect, getSingleBooking);
 
 

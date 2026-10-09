@@ -67,6 +67,18 @@ const bookingSchema = new mongoose.Schema(
       latitude: { type: Number, required: true },
       longitude: { type: Number, required: true },
     },
+    // Customer ki live location — jab customer washer ke driveway ki taraf
+    // travel kar raha ho. Customer app PATCH /bookings/:id/customer-location
+    // se update bhejti hai.
+    customerLocation: {
+      latitude: { type: Number, default: null },
+      longitude: { type: Number, default: null },
+      updatedAt: { type: Date, default: null },
+    },
+    // Google traffic-aware ETA (minutes) aur distance (miles) — customerLocation
+    // update par backend calculate karta hai.
+    customerEtaMinutes: { type: Number, default: null },
+    customerDistanceMiles: { type: Number, default: null },
     postalCode: {
       type: String,
       trim: true,

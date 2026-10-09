@@ -652,6 +652,147 @@ export const getUpcomingBookings = catchAsync(async (req, res) => {
   });
 });
 
+/**
+ * GET /api/v1/admin/tracking/live
+ * Live Tracking page ke liye real-time data: stats, active bookings
+ * (washer driveway + customer live location + ETA), provider status,
+ * top areas, recent activity.
+ */
+export const getTrackingLive = catchAsync(async (req, res) => {
+  const now = new Date();
+  const todayStart = startOfDay(now);
+  const travellingSince = new Date(now.getTime() - 15 * 60 * 1000); // 15 min
+  const ACTIVE_STATUSES = ["accepted", "arrived", "ongoing"];
+
+  const [
+    activeBookings,
+    washersOnline,
+    totalProviders,
+    inProgress,
+    completedToday,
+    providersWithActiveBooking,
+  ] = await Promise.all([
+    Booking.find({ status: { $in: ACTIVE_STATUSES } })
+      .populate("provider", "_id name phoneNumber isOnline location serviceLocationAddress")
+      .populate("user", "_id name")
+      .populate("service", "_id title")
+      .sort({ createdAt: -1 })
+      .lean(),
+    User.countDocuments({ role: "provider", isOnline: true }),
+    User.countDocuments({ role: "provider" }),
+    Booking.countDocuments({ status: "ongoing" }),
+    Booking.countDocuments({
+      status: "completed",
+      completedAt: { $gte: todayStart },
+    }),
+    Booking.distinct("provider", { status: { $in: ACTIVE_STATUSES } }),
+  ]);
+
+  const busyProviderIds = new Set(providersWithActiveBooking.map(String));
+
+  // Customers travelling — accepted + recent live location share
+  const customersTravelling = activeBookings.filter(
+    (b) =>
+      b.status === "accepted" &&
+      b.customerLocation?.updatedAt &&
+      new Date(b.customerLocation.updatedAt) >= travellingSince
+  ).length;
+
+  const bookings = activeBookings.map((b) => {
+    const p = b.provider || {};
+    const coords = p.location?.coordinates; // GeoJSON: [lng, lat]
+    const providerId = String(p._id || b.provider);
+    return {
+      id: b._id.toString(),
+      status: b.status,
+      service: b.service?.title || "Wash",
+      price: b.finalPrice,
+      // Washer — FIXED driveway (client: washer live movement track nahi karni)
+      washerName: p.name || "—",
+      washerPhone: p.phoneNumber || "",
+      washerStatus: !p.isOnline
+        ? "offline"
+        : busyProviderIds.has(providerId)
+          ? "busy"
+          : "online",
+      drivewayLat: Array.isArray(coords) ? coords[1] : null,
+      drivewayLng: Array.isArray(coords) ? coords[0] : null,
+      drivewayAddress: [
+        p.serviceLocationAddress?.streetAddress,
+        p.serviceLocationAddress?.city,
+        p.serviceLocationAddress?.postcode,
+      ]
+        .filter(Boolean)
+        .join(", "),
+      // Customer — LIVE location (travelling)
+      customerName: b.user?.name || "—",
+      customerLat: b.customerLocation?.latitude ?? null,
+      customerLng: b.customerLocation?.longitude ?? null,
+      customerLocationUpdatedAt: b.customerLocation?.updatedAt || null,
+      etaMinutes: b.customerEtaMinutes ?? null,
+      distanceMiles: b.customerDistanceMiles ?? null,
+      address: b.address?.addressLine || "",
+      startedAt: b.createdAt,
+    };
+  });
+
+  const online = washersOnline;
+  const busy = providersWithActiveBooking.length;
+  const offline = Math.max(totalProviders - online, 0);
+
+  // Top areas — aaj ki bookings, postalCode area se group
+  const todayBookings = await Booking.find({ createdAt: { $gte: todayStart } })
+    .select("postalCode")
+    .lean();
+  const areaCounts = {};
+  for (const b of todayBookings) {
+    const area = String(b.postalCode || "").split(" ")[0].toUpperCase() || "Unknown";
+    areaCounts[area] = (areaCounts[area] || 0) + 1;
+  }
+  const topAreas = Object.entries(areaCounts)
+    .map(([name, bookingsCount]) => ({ name, bookings: bookingsCount }))
+    .sort((a, b) => b.bookings - a.bookings)
+    .slice(0, 5);
+
+  // Recent activity
+  const logs = await ActivityLog.find()
+    .sort({ createdAt: -1 })
+    .limit(8)
+    .select("action createdAt")
+    .lean();
+  const colorFor = (action = "") => {
+    const a = action.toLowerCase();
+    if (a.includes("complet") || a.includes("accept") || a.includes("online"))
+      return "green";
+    if (a.includes("book") || a.includes("payment")) return "blue";
+    return "red";
+  };
+  const recentActivity = logs.map((l) => ({
+    time: new Date(l.createdAt).toTimeString().slice(0, 5),
+    text: l.action,
+    color: colorFor(l.action),
+  }));
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Live tracking data fetched successfully",
+    data: {
+      stats: {
+        activeBookings: activeBookings.length,
+        washersOnline: online,
+        inProgress,
+        completedToday,
+        customersTravelling,
+      },
+      bookings,
+      providerStatus: { total: totalProviders, online, busy, offline },
+      topAreas,
+      recentActivity,
+    },
+  });
+});
+
 export const getAllUsers = catchAsync(async (req, res) => {
   const users = await User.find().select(
     dashboardUserSelect

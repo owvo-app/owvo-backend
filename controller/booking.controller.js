@@ -14,6 +14,7 @@ import { isProviderAvailableNow } from "../utils/availability.util.js";
 import { syncProviderCompletedJobs } from "../utils/completedJobs.util.js";
 import catchAsync from "../utils/catch.Async.js";
 import { refreshProviderBusyState } from "../utils/providerBusy.util.js";
+import { getTrafficEta } from "../utils/eta.util.js";
 import sendResponse from "../utils/sendResponse.js";
 
 const toCustomerSocketPayload = (customer) => {
@@ -669,6 +670,97 @@ export const updateBookingStatus = catchAsync(async (req, res) => {
     success: true,
     message: "Booking status updated",
     data: booking,
+  });
+});
+
+/**
+ * PATCH /api/v1/bookings/:id/customer-location
+ * Customer apni live GPS location share karta hai jab washer ke driveway
+ * ki taraf travel kar raha ho. Backend traffic-aware ETA + distance
+ * calculate karke washer + admin ko socket par push karta hai.
+ * Sirf booking ka owner (customer) ya admin call kar sakta hai.
+ */
+export const updateCustomerLocation = catchAsync(async (req, res) => {
+  const { id } = req.params;
+  const { latitude, longitude } = req.body;
+
+  if (
+    typeof latitude !== "number" ||
+    typeof longitude !== "number" ||
+    !Number.isFinite(latitude) ||
+    !Number.isFinite(longitude)
+  ) {
+    throw new AppError(httpStatus.BAD_REQUEST, "Valid latitude/longitude required");
+  }
+
+  const booking = await Booking.findById(id).populate("provider", "_id name");
+  if (!booking) {
+    throw new AppError(httpStatus.NOT_FOUND, "Booking not found");
+  }
+
+  const isOwner = String(booking.user) === String(req.user._id);
+  const isAdmin = req.user?.role === "admin";
+  if (!isOwner && !isAdmin) {
+    throw new AppError(httpStatus.FORBIDDEN, "Access denied");
+  }
+
+  // Sirf active bookings par location share ho (travelling phase)
+  if (!["accepted", "arrived", "ongoing"].includes(booking.status)) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "Location can only be shared for active bookings"
+    );
+  }
+
+  booking.customerLocation = {
+    latitude,
+    longitude,
+    updatedAt: new Date(),
+  };
+
+  // Washer ka driveway — provider ki fixed service location
+  const provider = await User.findById(booking.provider?._id || booking.provider).select(
+    "location"
+  );
+  const destLat = provider?.location?.coordinates?.[1];
+  const destLng = provider?.location?.coordinates?.[0];
+
+  // Google traffic-aware ETA + distance (miles)
+  const { etaMinutes, distanceMiles } = await getTrafficEta(
+    latitude,
+    longitude,
+    destLat,
+    destLng
+  );
+  booking.customerEtaMinutes = etaMinutes;
+  booking.customerDistanceMiles = distanceMiles;
+  await booking.save();
+
+  const payload = {
+    bookingId: booking._id.toString(),
+    latitude,
+    longitude,
+    etaMinutes,
+    distanceMiles,
+    updatedAt: booking.customerLocation.updatedAt,
+  };
+
+  // Washer ko live — apne customer ka safar + ETA dekhe
+  const providerId = String(booking.provider?._id || booking.provider);
+  emitToUser(providerId, "customer_location_updated", payload);
+
+  // Admin dashboard (Live Tracking) ko live
+  broadcast("admin_customer_location_updated", {
+    ...payload,
+    providerId,
+    userId: String(booking.user),
+  });
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Customer location updated",
+    data: payload,
   });
 });
 
