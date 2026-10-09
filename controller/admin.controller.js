@@ -690,10 +690,12 @@ export const getTrackingLive = catchAsync(async (req, res) => {
 
   const busyProviderIds = new Set(providersWithActiveBooking.map(String));
 
-  // Customers travelling — accepted + recent live location share
+  // Customers travelling — fresh live location + abhi pahunche nahi
+  // (accepted = raste me, ongoing = wash shuru lekin location fresh = abhi safar me)
   const customersTravelling = activeBookings.filter(
     (b) =>
-      b.status === "accepted" &&
+      (b.status === "accepted" || b.status === "ongoing") &&
+      b.customerLocation?.latitude != null &&
       b.customerLocation?.updatedAt &&
       new Date(b.customerLocation.updatedAt) >= travellingSince
   ).length;
