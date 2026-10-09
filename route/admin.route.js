@@ -26,6 +26,7 @@ import {
   getStaffAccounts,
   getUpcomingBookings,
   getTrackingLive,
+  getTrackingBookingStats,
   getAllUsers,
   getAllProviders,
   getProviderAcceptanceHistory,
@@ -81,6 +82,7 @@ router.get("/dashboard/revenue", protect, hasDashboardMenu("dashboard"), getDash
 router.get("/dashboard/recent-bookings", protect, hasDashboardMenu("dashboard"), getRecentBookings);
 router.get("/dashboard/upcoming-bookings", protect, hasDashboardMenu("dashboard"), getUpcomingBookings);
 router.get("/tracking/live", protect, hasDashboardMenu("tracking"), getTrackingLive);
+router.get("/tracking/booking-stats", protect, hasDashboardMenu("tracking"), getTrackingBookingStats);
 
 router.get("/bookings", protect, hasDashboardMenu("bookings"), getAdminBookings);
 router.get("/bookings/:id", protect, hasDashboardMenu("bookings"), getAdminBookingById);

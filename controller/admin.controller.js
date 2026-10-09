@@ -793,6 +793,88 @@ export const getTrackingLive = catchAsync(async (req, res) => {
   });
 });
 
+/**
+ * GET /api/v1/admin/tracking/booking-stats?range=today|week|month
+ * Booking Statistics (hourly/daily buckets) + Top Areas — range filter ke sath.
+ */
+export const getTrackingBookingStats = catchAsync(async (req, res) => {
+  const range = ["today", "week", "month"].includes(req.query.range)
+    ? req.query.range
+    : "today";
+  const now = new Date();
+
+  let start;
+  let bucketCount;
+  let bucketLabel;
+  if (range === "today") {
+    start = startOfDay(now);
+    bucketCount = 24;
+    bucketLabel = (i) => `${i}`;
+  } else if (range === "week") {
+    start = startOfWeek(now);
+    bucketCount = 7;
+    bucketLabel = (i) =>
+      ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][i];
+  } else {
+    start = new Date(now.getFullYear(), now.getMonth(), 1);
+    bucketCount = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+    bucketLabel = (i) => `${i + 1}`;
+  }
+
+  const bookings = await Booking.find({ createdAt: { $gte: start } })
+    .select("status createdAt postalCode")
+    .lean();
+
+  const buckets = Array.from({ length: bucketCount }, (_, i) => ({
+    label: bucketLabel(i),
+    completed: 0,
+    active: 0,
+    cancelled: 0,
+  }));
+
+  const areaCounts = {};
+  for (const b of bookings) {
+    const d = new Date(b.createdAt);
+    let idx;
+    if (range === "today") {
+      idx = d.getHours();
+    } else if (range === "week") {
+      idx = (d.getDay() + 6) % 7; // Mon=0
+    } else {
+      idx = d.getDate() - 1;
+    }
+    if (idx >= 0 && idx < bucketCount) {
+      if (b.status === "completed") buckets[idx].completed++;
+      else if (b.status === "cancelled") buckets[idx].cancelled++;
+      else buckets[idx].active++;
+    }
+    const area =
+      String(b.postalCode || "").split(" ")[0].toUpperCase() || "Unknown";
+    areaCounts[area] = (areaCounts[area] || 0) + 1;
+  }
+
+  const topAreas = Object.entries(areaCounts)
+    .map(([name, bookingsCount]) => ({ name, bookings: bookingsCount }))
+    .sort((a, b) => b.bookings - a.bookings)
+    .slice(0, 5);
+
+  // Today range me khali hours chhupao (6-22 jaisa) — sirf jab data ho
+  const filtered =
+    range === "today" && bookings.length > 0
+      ? buckets.filter(
+          (bk, i) =>
+            i >= 6 && i <= 22 && (bk.completed + bk.active + bk.cancelled > 0 || (i % 2 === 0))
+        )
+      : buckets;
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Tracking booking stats fetched successfully",
+    data: { range, buckets: filtered.length ? filtered : buckets, topAreas },
+  });
+});
+
 export const getAllUsers = catchAsync(async (req, res) => {
   const users = await User.find().select(
     dashboardUserSelect
