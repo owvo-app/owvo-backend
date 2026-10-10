@@ -14,6 +14,7 @@ import { PlatformSetting } from "../model/platformSetting.model.js";
 import { Payout } from "../model/payout.model.js";
 import { sendEmail } from "../utils/sendEmail.js";
 import { broadcast, emitToUser } from "../socket/socket.js";
+import { recordActivity } from "../utils/activityLog.util.js";
 import { notifyUser } from "../utils/fcm.util.js";
 import {
   isProviderAvailableNow,
@@ -591,6 +592,14 @@ export const acceptBooking = catchAsync(async (req, res) => {
     booking.washEndsAt = new Date(booking.arrivedAt.getTime() + 30 * 60 * 1000);
   }
   await booking.save();
+
+  recordActivity({
+    req,
+    action: `booking.${status}`,
+    entityType: "booking",
+    entityId: booking._id,
+    metadata: { bookingId: booking._id.toString(), actor: "Washer", status },
+  });
   await refreshProviderBusyState(washer);
   if (washer.isModified()) {
     await washer.save();
@@ -708,6 +717,13 @@ export const declineBooking = catchAsync(async (req, res) => {
   booking.cancelledBy = "provider";
   booking.cancelledAt = new Date();
   await booking.save();
+  recordActivity({
+    req,
+    action: "booking.declined",
+    entityType: "booking",
+    entityId: booking._id,
+    metadata: { bookingId: booking._id.toString(), actor: "Washer" },
+  });
 
   const bookingUserId =
     booking.user?._id?.toString?.() || booking.user?.toString();
@@ -749,8 +765,11 @@ export const completeWash = catchAsync(async (req, res) => {
 
   await refreshProviderBusyState(washer);
 
+  // Job complete → wapas online (agar daily limit bachi ho)
   if (washer.dailyWashLimit <= 0) {
     washer.isOnline = false;
+  } else {
+    washer.isOnline = true;
   }
 
   await washer.save();

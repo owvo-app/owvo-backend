@@ -9,6 +9,7 @@ import { Service } from "../model/service.model.js";
 import { User } from "../model/user.model.js";
 import { Vehicle } from "../model/vehicle.model.js";
 import { broadcast, emitToUser } from "../socket/socket.js";
+import { recordActivity } from "../utils/activityLog.util.js";
 import { notifyUser } from "../utils/fcm.util.js";
 import { isProviderAvailableNow } from "../utils/availability.util.js";
 import { syncProviderCompletedJobs } from "../utils/completedJobs.util.js";
@@ -364,6 +365,18 @@ export const createBooking = catchAsync(async (req, res) => {
     vehicle: vehiclePayload,
   }));
 
+  recordActivity({
+    req,
+    action: "booking.created",
+    entityType: "booking",
+    entityId: booking._id,
+    metadata: {
+      bookingId: booking._id.toString(),
+      service: servicePayload?.title || "",
+      finalPrice: finalPrice,
+    },
+  });
+
   sendResponse(res, {
     statusCode: httpStatus.CREATED,
     success: true,
@@ -495,6 +508,20 @@ export const updateBookingStatus = catchAsync(async (req, res) => {
   }
   await booking.save();
   await refreshProviderBusyState(booking.provider);
+
+  // System logs me booking event
+  const actorLabel = isProvider ? "Washer" : isOwner ? "Customer" : "Admin";
+  recordActivity({
+    req,
+    action: `booking.${status}`,
+    entityType: "booking",
+    entityId: booking._id,
+    metadata: {
+      bookingId: booking._id.toString(),
+      status,
+      actor: actorLabel,
+    },
+  });
   await booking.populate([
     {
       path: "user",
