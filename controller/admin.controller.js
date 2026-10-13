@@ -1456,6 +1456,8 @@ export const updateAdminCatalogService = catchAsync(async (req, res) => {
     throw new AppError(httpStatus.NOT_FOUND, "Catalog service not found");
   }
 
+  const wasActive = service.isActive !== false;
+
   serviceEditableFields.forEach((field) => {
     if (req.body?.[field] !== undefined) {
       service[field] = field === "price" ? asMoney(req.body[field]) : req.body[field];
@@ -1478,8 +1480,9 @@ export const updateAdminCatalogService = catchAsync(async (req, res) => {
     description: service.description,
   };
 
-  if (service.isActive === false) {
-    providerUpdate.isActive = false;
+  const nowActive = service.isActive !== false;
+  if (req.body?.isActive !== undefined && nowActive !== wasActive) {
+    providerUpdate.isActive = nowActive;
   }
 
   const providerServices = await Service.find({ catalogKey: service.catalogKey, provider: { $ne: null } });
