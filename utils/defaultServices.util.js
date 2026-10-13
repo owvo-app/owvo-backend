@@ -141,6 +141,8 @@ export const ensureProviderServices = async (providerId) => {
       findDefaultServiceForPayload(providerService);
     if (!catalogService) continue;
 
+    // NOTE: isActive yahan sync nahi hota — ye provider ki apni choice hy.
+    // Admin ka isActive change admin.controller.js se propagate hota hy.
     const fixedFields = {
       serviceType: catalogService.serviceType,
       title: catalogService.title,
@@ -149,7 +151,6 @@ export const ensureProviderServices = async (providerId) => {
       carName: catalogService.carName,
       carModel: catalogService.carModel,
       description: catalogService.description,
-      isActive: catalogService.isActive !== false,
     };
 
     let changed = false;
