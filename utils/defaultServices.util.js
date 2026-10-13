@@ -149,6 +149,7 @@ export const ensureProviderServices = async (providerId) => {
       carName: catalogService.carName,
       carModel: catalogService.carModel,
       description: catalogService.description,
+      isActive: catalogService.isActive !== false,
     };
 
     let changed = false;
