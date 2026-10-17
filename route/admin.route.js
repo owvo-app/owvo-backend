@@ -1,5 +1,12 @@
 import express from "express";
 import {
+  getAdminTickets,
+  getAdminTicketById,
+  updateAdminTicket,
+  adminReplyToTicket,
+} from "../controller/ticket.controller.js";
+
+import {
   createAdminPayout,
   createAdminCommissionWithdrawal,
   createStaffAccount,
@@ -92,6 +99,11 @@ router.get("/bookings/:id", protect, hasDashboardMenu("bookings"), getAdminBooki
 router.patch("/bookings/:id/status", protect, hasDashboardMenu("bookings"), updateAdminBookingStatus);
 
 router.get("/reports", protect, hasDashboardMenu("reports"), getAdminReports);
+router.get("/tickets", protect, hasDashboardMenu("reports"), getAdminTickets);
+router.get("/tickets/:id", protect, hasDashboardMenu("reports"), getAdminTicketById);
+router.patch("/tickets/:id", protect, hasDashboardMenu("reports"), updateAdminTicket);
+router.post("/tickets/:id/messages", protect, hasDashboardMenu("reports"), adminReplyToTicket);
+
 router.get("/reports/:reportId/photo", protect, hasDashboardMenu("reports"), getAdminReportPhoto);
 router.patch("/reports/:reportId/status", protect, isAdmin, updateAdminReportStatus);
 router.get("/services-pricing", protect, hasDashboardMenu("reports"), getAdminServicesPricing);

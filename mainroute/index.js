@@ -15,6 +15,7 @@ import chatRoutes from "../route/chat.route.js";
 import userRatingRoutes from "../route/userRating.route.js";
 import issueReportRoutes from "../route/issueReport.route.js";
 import addonRoutes from "../route/addon.route.js";
+import ticketRoute from "../route/ticket.route.js";
 
 const router = express.Router();
 
@@ -33,5 +34,6 @@ router.use("/chat", chatRoutes);
 router.use("/user-rating", userRatingRoutes);
 router.use("/reports", issueReportRoutes);
 router.use("/addons", addonRoutes);
+router.use("/tickets", ticketRoute);
 
 export default router;
