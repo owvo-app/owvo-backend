@@ -1,6 +1,6 @@
-import { catchAsync } from "../utils/catchAsync.js";
-import { AppError } from "../errors/AppError.js";
-import { httpStatus } from "../utils/httpStatus.js";
+import catchAsync from "../utils/catch.Async.js";
+import AppError from "../errors/AppError.js";
+import httpStatus from "http-status";
 import { SupportTicket } from "../model/supportTicket.model.js";
 import { User } from "../model/user.model.js";
 import { Booking } from "../model/booking.model.js";
