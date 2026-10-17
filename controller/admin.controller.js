@@ -1063,6 +1063,60 @@ export const getAllCustomers = catchAsync(async (req, res) => {
   });
 });
 
+export const createAdminBooking = catchAsync(async (req, res) => {
+  const { customerId, providerId, serviceId, bookingDate, address, notes } = req.body;
+
+  if (!customerId || !providerId || !serviceId || !bookingDate || !address) {
+    throw new AppError(httpStatus.BAD_REQUEST, "Missing required fields: customerId, providerId, serviceId, bookingDate, address");
+  }
+
+  const customer = await User.findById(customerId);
+  if (!customer || customer.role !== "customer") {
+    throw new AppError(httpStatus.NOT_FOUND, "Customer not found");
+  }
+
+  const provider = await User.findById(providerId);
+  if (!provider || provider.role !== "provider") {
+    throw new AppError(httpStatus.NOT_FOUND, "Provider not found");
+  }
+
+  const service = await Service.findOne({ _id: serviceId, isActive: true })
+    .select("_id title price serviceType")
+    .lean();
+  if (!service) {
+    throw new AppError(httpStatus.NOT_FOUND, "Service not found");
+  }
+
+  const booking = await Booking.create({
+    user: customerId,
+    provider: providerId,
+    service: serviceId,
+    serviceSnapshot: { title: service.title, price: service.price },
+    bookingDate: new Date(bookingDate),
+    address,
+    notes: notes || "",
+    status: "accepted",
+    price: service.price,
+    finalPrice: service.price,
+    payment: { status: "pending" },
+    createdBy: req.user._id,
+    createdByRole: "admin",
+  });
+
+  try {
+    emitToUser(providerId.toString(), "new_booking_request", {
+      bookingId: booking._id.toString(),
+      message: "New booking assigned by admin: " + service.title,
+    });
+  } catch (e) { /* socket optional */ }
+
+  res.status(httpStatus.CREATED).json({
+    success: true,
+    data: booking,
+  });
+});
+
+
 export const getAdminBookings = catchAsync(async (req, res) => {
   const {
     status,

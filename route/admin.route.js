@@ -8,6 +8,7 @@ import {
   getActivityLogs,
   getAdminBookingById,
   getAdminBookings,
+  createAdminBooking,
   getAdminEarnings,
   getAdminMe,
   getAdminNotifications,
@@ -83,6 +84,8 @@ router.get("/dashboard/recent-bookings", protect, hasDashboardMenu("dashboard"),
 router.get("/dashboard/upcoming-bookings", protect, hasDashboardMenu("dashboard"), getUpcomingBookings);
 router.get("/tracking/live", protect, hasDashboardMenu("tracking"), getTrackingLive);
 router.get("/tracking/booking-stats", protect, hasDashboardMenu("tracking"), getTrackingBookingStats);
+router.post("/bookings", protect, hasDashboardMenu("bookings"), createAdminBooking);
+
 
 router.get("/bookings", protect, hasDashboardMenu("bookings"), getAdminBookings);
 router.get("/bookings/:id", protect, hasDashboardMenu("bookings"), getAdminBookingById);
