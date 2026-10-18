@@ -216,10 +216,12 @@ export const approvePayout = catchAsync(async (req, res) => {
 /** GET /opportunities — active opportunities for provider */
 export const getProviderOpportunities = catchAsync(async (req, res) => {
   const now = new Date();
+  // 12h grace period for timezone differences (same as createOpportunity)
+  const graceStart = new Date(now.getTime() + 12 * 60 * 60 * 1000);
   const opportunities = await Opportunity.find({
     isActive: true,
     status: "active",
-    startDate: { $lte: now },
+    startDate: { $lte: graceStart },
     endDate: { $gte: now },
     $or: [
       { audience: "all" },
