@@ -17,6 +17,8 @@ import catchAsync from "../utils/catch.Async.js";
 import { refreshProviderBusyState } from "../utils/providerBusy.util.js";
 import { getTrafficEta } from "../utils/eta.util.js";
 import sendResponse from "../utils/sendResponse.js";
+import { updateProgressOnBookingComplete } from "./opportunity.controller.js";
+
 
 const toCustomerSocketPayload = (customer) => {
   if (!customer) return null;
@@ -546,6 +548,7 @@ export const updateBookingStatus = catchAsync(async (req, res) => {
     status === "completed"
       ? await syncProviderCompletedJobs(bookingProviderId)
       : null;
+      if (status === "completed") await updateProgressOnBookingComplete(bookingProviderId, booking);
   const customerPayload = toCustomerSocketPayload(booking.user);
   const servicePayload = booking.service
     ? {

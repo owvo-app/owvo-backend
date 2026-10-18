@@ -7,6 +7,17 @@ import {
 } from "../controller/ticket.controller.js";
 
 import {
+  createOpportunity,
+  getAdminOpportunities,
+  updateOpportunity,
+  deleteOpportunity,
+  getAllProgress,
+  getBonusPayouts,
+  approvePayout,
+} from "../controller/opportunity.controller.js";
+
+
+import {
   createAdminPayout,
   createAdminCommissionWithdrawal,
   createStaffAccount,
@@ -103,6 +114,15 @@ router.get("/tickets", protect, hasDashboardMenu("reports"), getAdminTickets);
 router.get("/tickets/:id", protect, hasDashboardMenu("reports"), getAdminTicketById);
 router.patch("/tickets/:id", protect, hasDashboardMenu("reports"), updateAdminTicket);
 router.post("/tickets/:id/messages", protect, hasDashboardMenu("reports"), adminReplyToTicket);
+
+router.post("/opportunities", protect, hasDashboardMenu("washers"), createOpportunity);
+router.get("/opportunities", protect, hasDashboardMenu("washers"), getAdminOpportunities);
+router.patch("/opportunities/:id", protect, hasDashboardMenu("washers"), updateOpportunity);
+router.delete("/opportunities/:id", protect, hasDashboardMenu("washers"), deleteOpportunity);
+router.get("/opportunities/progress", protect, hasDashboardMenu("washers"), getAllProgress);
+router.get("/opportunities/payouts", protect, hasDashboardMenu("washers"), getBonusPayouts);
+router.patch("/opportunities/payouts/:id", protect, hasDashboardMenu("washers"), approvePayout);
+
 
 router.get("/reports/:reportId/photo", protect, hasDashboardMenu("reports"), getAdminReportPhoto);
 router.patch("/reports/:reportId/status", protect, isAdmin, updateAdminReportStatus);
