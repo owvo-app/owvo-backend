@@ -12,6 +12,9 @@ const defaultProductionOrigins = [
   "https://owvo-dashboard.onrender.com",
   "https://owvo-admin-dashboard.netlify.app",
   "https://owvo-dashboard.netlify.app",
+  // Allow local admin panel to connect to production backend for testing
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
 ];
 
 export const getAllowedOrigins = () => {
