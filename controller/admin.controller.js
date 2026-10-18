@@ -892,7 +892,7 @@ export const getAllUsers = catchAsync(async (req, res) => {
 
 export const getAllProviders = catchAsync(async (req, res) => {
   // Default to "all" when no range specified - this is a management list
-  if (!req.query.range) req.query.range = "all";
+  const queryWithDefaultRange = { ...req.query, range: req.query.range || "all" };
   await User.updateMany(
     {
       role: "provider",
@@ -905,7 +905,7 @@ export const getAllProviders = catchAsync(async (req, res) => {
     { $set: { isOnline: false, isBusy: false } }
   );
 
-  const providers = await User.find(mergeFilter({ role: "provider" }, "createdAt", req.query))
+  const providers = await User.find(mergeFilter({ role: "provider" }, "createdAt", queryWithDefaultRange))
     .select(dashboardUserSelect)
     .sort({ createdAt: -1 })
     .lean();
