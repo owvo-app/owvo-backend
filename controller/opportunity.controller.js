@@ -35,9 +35,10 @@ export const createOpportunity = catchAsync(async (req, res) => {
     throw new AppError(httpStatus.BAD_REQUEST, "End date must be after start date");
   }
 
-  // Auto-determine status
+  // Auto-determine status (timezone-tolerant: 12h grace period covers all timezones)
   let status = "scheduled";
-  if (start <= now && end >= now) status = "active";
+  const twelveHours = 12 * 60 * 60 * 1000;
+  if (start.getTime() - twelveHours <= now.getTime() && end >= now) status = "active";
   if (end < now) status = "ended";
 
   const opportunity = await Opportunity.create({
