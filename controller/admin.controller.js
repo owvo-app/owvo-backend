@@ -891,6 +891,8 @@ export const getAllUsers = catchAsync(async (req, res) => {
 });
 
 export const getAllProviders = catchAsync(async (req, res) => {
+  // Default to "all" when no range specified - this is a management list
+  if (!req.query.range) req.query.range = "all";
   await User.updateMany(
     {
       role: "provider",
@@ -1103,10 +1105,11 @@ export const createAdminBooking = catchAsync(async (req, res) => {
     createdByRole: "admin",
   });
 
+  // Notify provider via socket
   try {
     emitToUser(providerId.toString(), "new_booking_request", {
       bookingId: booking._id.toString(),
-      message: "New booking assigned by admin: " + service.title,
+      message: `New booking assigned by admin: ${service.title}`,
     });
   } catch (e) { /* socket optional */ }
 
@@ -1115,7 +1118,6 @@ export const createAdminBooking = catchAsync(async (req, res) => {
     data: booking,
   });
 });
-
 
 export const getAdminBookings = catchAsync(async (req, res) => {
   const {
