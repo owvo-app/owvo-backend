@@ -130,6 +130,11 @@ const bookingSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    savedForLater: {
+      type: Boolean,
+      default: false,
+    },
+
     currency: {
       type: String,
       default: "GBP",

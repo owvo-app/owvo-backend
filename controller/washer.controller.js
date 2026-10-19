@@ -686,6 +686,68 @@ export const acceptBooking = catchAsync(async (req, res) => {
  * Provider declines an incoming (pending) booking request.
  * Customer gets a socket event + push notification.
  */
+// Add these to controller/washer.controller.js
+// Add imports: saveBookingForLater, unsaveBookingForLater where other functions are imported
+
+// POST /washers/save/:bookingId - Save booking for later
+export const saveBookingForLater = catchAsync(async (req, res) => {
+  const washer = await User.findById(req.user._id);
+
+  if (!washer || washer.role !== "provider") {
+    throw new AppError(httpStatus.NOT_FOUND, "Washer not found");
+  }
+
+  const booking = await Booking.findById(req.params.bookingId);
+
+  if (!booking) {
+    throw new AppError(httpStatus.NOT_FOUND, "Booking not found");
+  }
+
+  if (booking.provider.toString() !== washer._id.toString()) {
+    throw new AppError(httpStatus.FORBIDDEN, "You cannot update this booking");
+  }
+
+  booking.savedForLater = true;
+  await booking.save();
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Booking saved for later",
+    data: { savedForLater: true },
+  });
+});
+
+// POST /washers/unsave/:bookingId - Remove booking from saved
+export const unsaveBookingForLater = catchAsync(async (req, res) => {
+  const washer = await User.findById(req.user._id);
+
+  if (!washer || washer.role !== "provider") {
+    throw new AppError(httpStatus.NOT_FOUND, "Washer not found");
+  }
+
+  const booking = await Booking.findById(req.params.bookingId);
+
+  if (!booking) {
+    throw new AppError(httpStatus.NOT_FOUND, "Booking not found");
+  }
+
+  if (booking.provider.toString() !== washer._id.toString()) {
+    throw new AppError(httpStatus.FORBIDDEN, "You cannot update this booking");
+  }
+
+  booking.savedForLater = false;
+  await booking.save();
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Booking removed from saved",
+    data: { savedForLater: false },
+  });
+});
+
+
 export const declineBooking = catchAsync(async (req, res) => {
   const washer = await User.findById(req.user._id);
 
