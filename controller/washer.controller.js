@@ -1495,6 +1495,8 @@ export const getNearbyWashers = catchAsync(async (req, res) => {
       preferredServices,
       averageRating: rating.averageRating,
       totalRatings: rating.totalRatings,
+      providerAddress: washerData.providerAddress,
+      serviceLocationAddress: washerData.serviceLocationAddress,
     };
   });
 
