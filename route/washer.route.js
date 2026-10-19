@@ -4,6 +4,7 @@ import {
   acceptWasherPolicies,
   acceptBooking,
   declineBooking,
+  requestCashOut,
   saveBookingForLater,
   unsaveBookingForLater,
   addPreferredService,
@@ -73,6 +74,7 @@ router.post("/decline/:bookingId", protect, declineBooking);
 router.post("/save/:bookingId", protect, saveBookingForLater);
 router.post("/unsave/:bookingId", protect, unsaveBookingForLater);
 router.post("/complete/:bookingId", protect, completeWash);
+router.post("/wallet/cashout", protect, requestCashOut);
 
 /**
  * PATCH /api/v1/washers/location

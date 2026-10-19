@@ -747,6 +747,117 @@ export const unsaveBookingForLater = catchAsync(async (req, res) => {
   });
 });
 
+// Add to controller/washer.controller.js
+// Make sure these are imported: Payout, Booking, paymentInfo, mongoose,
+// getPlatformSettingsDoc, netProviderShare, recordActivity
+
+// POST /washers/wallet/cashout - Provider requests immediate payout
+export const requestCashOut = catchAsync(async (req, res) => {
+  const providerId = req.user._id;
+
+  if (req.user?.role !== "provider") {
+    throw new AppError(httpStatus.FORBIDDEN, "Only providers can cash out");
+  }
+
+  // Check for existing pending/processing payout
+  const existingPending = await Payout.findOne({
+    provider: providerId,
+    status: { $in: ["pending", "processing"] },
+  });
+
+  if (existingPending) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "You already have a payout in progress"
+    );
+  }
+
+  // Calculate available balance (same logic as getWalletSummary)
+  const settings = await getPlatformSettingsDoc();
+  const commissionRate = Number(settings.commissionRate) || 0.25;
+
+  const completedFilter = { provider: providerId, status: "completed" };
+
+  const [lifetimeAgg, tipsAgg, paidOutAgg, pendingPayoutsAgg] =
+    await Promise.all([
+      Booking.aggregate([
+        { $match: completedFilter },
+        { $group: { _id: null, total: { $sum: "$finalPrice" } } },
+      ]),
+      paymentInfo.aggregate([
+        {
+          $match: {
+            providerId: new mongoose.Types.ObjectId(providerId),
+            type: "tips",
+            paymentStatus: "complete",
+          },
+        },
+        { $group: { _id: null, total: { $sum: "$price" } } },
+      ]),
+      Payout.aggregate([
+        { $match: { provider: providerId, status: "paid" } },
+        { $group: { _id: null, total: { $sum: "$amount" } } },
+      ]),
+      Payout.aggregate([
+        {
+          $match: {
+            provider: providerId,
+            status: { $in: ["pending", "processing"] },
+          },
+        },
+        { $group: { _id: null, total: { $sum: "$amount" } } },
+      ]),
+    ]);
+
+  const lifetimeGross = lifetimeAgg[0]?.total || 0;
+  const totalTips = tipsAgg[0]?.total || 0;
+  const totalPaidOut = paidOutAgg[0]?.total || 0;
+  const pendingBalance = pendingPayoutsAgg[0]?.total || 0;
+
+  const lifetimeNet = netProviderShare(lifetimeGross, commissionRate) + totalTips;
+  const availableBalance = Math.max(0, lifetimeNet - totalPaidOut - pendingBalance);
+
+  if (availableBalance <= 0) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "No available balance to cash out"
+    );
+  }
+
+  // Create payout request
+  const payout = await Payout.create({
+    provider: providerId,
+    amount: Math.round(availableBalance * 100) / 100,
+    currency: "GBP",
+    status: "pending",
+    payoutDate: new Date(),
+  });
+
+  recordActivity({
+    req,
+    action: "payout.requested",
+    entityType: "payout",
+    entityId: payout._id,
+    metadata: {
+      payoutId: payout._id.toString(),
+      amount: payout.amount,
+      actor: "Provider",
+    },
+  });
+
+  sendResponse(res, {
+    statusCode: httpStatus.CREATED,
+    success: true,
+    message: "Cash out requested successfully",
+    data: {
+      payoutId: payout._id,
+      amount: payout.amount,
+      status: payout.status,
+    },
+  });
+});
+
+
 
 export const declineBooking = catchAsync(async (req, res) => {
   const washer = await User.findById(req.user._id);
@@ -1814,6 +1925,11 @@ const netProviderShare = (grossAmount, commissionRate) =>
  */
 export const getWalletSummary = catchAsync(async (req, res) => {
   const providerId = req.user._id;
+  // Bank account last 4 digits for display
+  const provider = await User.findById(providerId).select("bankDetails").lean();
+  const accountNumber = provider?.bankDetails?.accountNumber || "";
+  const bankLast4 = accountNumber.length >= 4 ? accountNumber.slice(-4) : "";
+  const bankName = provider?.bankDetails?.bankName || "";
   const settings = await getPlatformSettingsDoc();
   const commissionRate = Number(settings.commissionRate) || 0.25;
 
@@ -1901,6 +2017,8 @@ export const getWalletSummary = catchAsync(async (req, res) => {
       totalTips,
       commissionRate,
       totalJobsCompleted: jobsCompleted,
+      bankLast4,  // <-- ADD THIS
+      bankName, 
     },
   });
 });
