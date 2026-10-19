@@ -1409,7 +1409,7 @@ export const getNearbyWashers = catchAsync(async (req, res) => {
 
   const washers = await User.find(query)
     .select(
-      "_id name photo isOnline isBusy dailyWashLimit location preferredServices availability"
+      "_id name photo isOnline isBusy dailyWashLimit location preferredServices availability serviceLocationAddress.postcode"
     )
     .populate(
       "preferredServices",
