@@ -30,9 +30,9 @@ const normalizeUserId = (userId) =>
 const getHandshakeUserId = (socket) =>
   normalizeUserId(
     socket.handshake.auth?.userId ||
-      socket.handshake.query?.userId ||
-      socket.handshake.headers?.userid ||
-      socket.handshake.headers?.userId
+    socket.handshake.query?.userId ||
+    socket.handshake.headers?.userid ||
+    socket.handshake.headers?.userId
   );
 
 const getHandshakeToken = (socket) => {
@@ -159,6 +159,7 @@ export const initSocket = (httpServer) => {
         senderId,
         recipientId,
         text,
+        attachment: null,
         createdAt: new Date().toISOString(),
       };
 
@@ -201,6 +202,15 @@ export const initSocket = (httpServer) => {
             senderId: doc.sender.toString(),
             recipientId: doc.recipient.toString(),
             text: doc.text,
+            attachment: doc.attachment?.url
+              ? {
+                url: doc.attachment.url,
+                type: doc.attachment.type,
+                name: doc.attachment.name,
+                mimeType: doc.attachment.mimeType,
+                size: doc.attachment.size,
+              }
+              : null,
             createdAt: doc.createdAt.toISOString(),
           };
         } catch (error) {
