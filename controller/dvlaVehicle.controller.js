@@ -4,6 +4,8 @@ import AppError from "../errors/AppError.js";
 import { Vehicle } from "../model/vehicle.model.js";
 import catchAsync from "../utils/catch.Async.js";
 import sendResponse from "../utils/sendResponse.js";
+import { uploadOnCloudinary } from "../utils/common.Method.js";
+
 
 const DVLA_VEHICLE_ENDPOINT =
   "https://driver-vehicle-licensing.api.gov.uk/vehicle-enquiry/v1/vehicles";
@@ -194,6 +196,21 @@ export const addDvlaVehicle = catchAsync(async (req, res) => {
     ? requestedSize
     : vehicleData.size;
   const hasExistingVehicle = await Vehicle.exists({ user: userId });
+  const vehicleImageFile =
+  req.files?.vehicleImage?.[0] ||
+  req.files?.["vehicle image"]?.[0] ||
+  req.files?.image?.[0] ||
+  req.file ||
+  null;
+let uploadedImageUrl = null;
+if (vehicleImageFile?.path) {
+  const uploadedImage = await uploadOnCloudinary(
+    vehicleImageFile.path,
+    "vehicles"
+  );
+  uploadedImageUrl = uploadedImage?.secure_url || null;
+}
+
 
   try {
     const vehicle = await Vehicle.create({
@@ -203,7 +220,7 @@ export const addDvlaVehicle = catchAsync(async (req, res) => {
       model: vehicleData.model,
       year: vehicleData.year,
       size,
-      image: null,
+      image: uploadedImageUrl,
       isDefault: !hasExistingVehicle,
       source: "dvla",
       colour: vehicleData.colour,

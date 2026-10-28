@@ -158,6 +158,22 @@ export const updateVehicle = catchAsync(async (req, res) => {
   if (year) vehicle.year = Number(year);
   if (size) vehicle.size = size;
   if (image !== undefined) vehicle.image = image || null;
+  const vehicleImageFile =
+  req.files?.vehicleImage?.[0] ||
+  req.files?.["vehicle image"]?.[0] ||
+  req.files?.image?.[0] ||
+  req.file ||
+  null;
+if (vehicleImageFile?.path) {
+  const uploadedImage = await uploadOnCloudinary(
+    vehicleImageFile.path,
+    "vehicles"
+  );
+  if (uploadedImage?.secure_url) {
+    vehicle.image = uploadedImage.secure_url;
+  }
+}
+
 
   try {
     await vehicle.save();

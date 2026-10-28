@@ -18,7 +18,17 @@ const router = express.Router();
 
 router.get("/", protect, getMyVehicles);
 router.post("/lookup", protect, lookupVehicleByRegistration);
-router.post("/dvla", protect, addDvlaVehicle);
+router.post(
+  "/dvla",
+  protect,
+  upload.fields([
+    { name: "vehicleImage", maxCount: 1 },
+    { name: "vehicle image", maxCount: 1 },
+    { name: "image", maxCount: 1 },
+  ]),
+  addDvlaVehicle
+);
+
 router.post(
   "/",
   protect,
@@ -30,7 +40,17 @@ router.post(
   addVehicle
 );
 router.get("/:id", protect, getVehicleById);
-router.patch("/:id", protect, updateVehicle);
+router.patch(
+  "/:id",
+  protect,
+  upload.fields([
+    { name: "vehicleImage", maxCount: 1 },
+    { name: "vehicle image", maxCount: 1 },
+    { name: "image", maxCount: 1 },
+  ]),
+  updateVehicle
+);
+
 router.delete("/:id", protect, deleteVehicle);
 router.patch("/:id/default", protect, setDefaultVehicle);
 
