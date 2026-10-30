@@ -58,6 +58,14 @@ const userSchema = new Schema(
       enum: ["active", "disabled"],
       default: "active",
     },
+    isDeleted: {
+      type: Boolean,
+      default: false,
+    },
+    deletedAt: {
+      type: Date,
+      default: null,
+    },
     adminVerification: {
       status: {
         type: String,

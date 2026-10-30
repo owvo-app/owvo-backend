@@ -905,7 +905,7 @@ export const getAllProviders = catchAsync(async (req, res) => {
     { $set: { isOnline: false, isBusy: false } }
   );
 
-  const providers = await User.find(mergeFilter({ role: "provider" }, "createdAt", queryWithDefaultRange))
+  const providers = await User.find(mergeFilter({ role: "provider", isDeleted: { $ne: true } }, "createdAt", queryWithDefaultRange))
     .select(dashboardUserSelect)
     .populate("preferredServices", "title price isActive")
     .sort({ createdAt: -1 })
@@ -1448,6 +1448,63 @@ export const updateProviderEnforcement = catchAsync(async (req, res) => {
   });
 });
 
+// ─── Provider Soft Delete (Providers redesign — Step 3) ─────────────────────
+// DELETE /admin/providers/:id — provider ka data delete NAHI hota (bookings,
+// payouts aur earnings ka record mehfooz rehta hy); sirf isDeleted flag lagta
+// hy, account disabled + banned ho jata hy aur provider list/detail se ghayab
+// ho jata hy. Active bookings hon to delete roka jata hy.
+export const deleteAdminProvider = catchAsync(async (req, res) => {
+  const { id } = req.params;
+
+  const provider = await User.findOne({
+    _id: id,
+    role: "provider",
+    isDeleted: { $ne: true },
+  });
+  if (!provider) {
+    throw new AppError(httpStatus.NOT_FOUND, "Provider not found");
+  }
+
+  const activeBookings = await Booking.countDocuments({
+    provider: provider._id,
+    status: { $in: ["accepted", "arrived", "ongoing"] },
+  });
+  if (activeBookings > 0) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "This provider has active bookings. Complete or cancel them before deleting."
+    );
+  }
+
+  provider.isDeleted = true;
+  provider.deletedAt = new Date();
+  provider.isOnline = false;
+  provider.isBusy = false;
+  provider.accountStatus = "disabled";
+  provider.enforcement = {
+    status: "banned",
+    reason: "Account deleted by admin",
+    updatedBy: req.user._id,
+    updatedAt: new Date(),
+  };
+  await provider.save();
+
+  await recordActivity({
+    req,
+    action: "provider.deleted",
+    entityType: "user",
+    entityId: provider._id,
+    metadata: { name: provider.name, email: provider.email },
+  });
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Provider deleted successfully",
+    data: { _id: provider._id },
+  });
+});
+
 // ─── Provider Detail (Providers redesign — Step 1) ──────────────────────────
 // GET /admin/providers/:id — detail panel ke liye provider ki poori profile,
 // services, stats (completion rate ke sath), earnings/wallet aur recent
@@ -1456,7 +1513,7 @@ export const getAdminProviderDetail = catchAsync(async (req, res) => {
   const { id } = req.params;
   const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
-  const provider = await User.findOne({ _id: id, role: "provider" })
+  const provider = await User.findOne({ _id: id, role: "provider", isDeleted: { $ne: true } })
     .select(providerVerificationSelect)
     .lean();
   if (!provider) {
