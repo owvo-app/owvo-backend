@@ -907,6 +907,7 @@ export const getAllProviders = catchAsync(async (req, res) => {
 
   const providers = await User.find(mergeFilter({ role: "provider" }, "createdAt", queryWithDefaultRange))
     .select(dashboardUserSelect)
+    .populate("preferredServices", "title price isActive")
     .sort({ createdAt: -1 })
     .lean();
   const providerIds = providers.map((provider) => provider._id).filter(Boolean);
@@ -1446,6 +1447,244 @@ export const updateProviderEnforcement = catchAsync(async (req, res) => {
     data: maskProviderVerificationPayload(provider),
   });
 });
+
+// ─── Provider Detail (Providers redesign — Step 1) ──────────────────────────
+// GET /admin/providers/:id — detail panel ke liye provider ki poori profile,
+// services, stats (completion rate ke sath), earnings/wallet aur recent
+// activity ek hi response me. Bank/NI/Stripe numbers hamesha masked ayenge.
+export const getAdminProviderDetail = catchAsync(async (req, res) => {
+  const { id } = req.params;
+  const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+  const provider = await User.findOne({ _id: id, role: "provider" })
+    .select(providerVerificationSelect)
+    .lean();
+  if (!provider) {
+    throw new AppError(httpStatus.NOT_FOUND, "Provider not found");
+  }
+  const providerId = provider._id;
+
+  const settings = await getPlatformSettingsDoc();
+  const commissionRate = Number(settings?.commissionRate) || 0.25;
+
+  const now = new Date();
+  const todayStart = new Date(now);
+  todayStart.setUTCHours(0, 0, 0, 0);
+  const currentDay = now.getUTCDay();
+  const weekStart = new Date(now);
+  weekStart.setUTCDate(now.getUTCDate() - (currentDay === 0 ? 6 : currentDay - 1));
+  weekStart.setUTCHours(0, 0, 0, 0);
+
+  const [
+    services,
+    ratingAgg,
+    statusCounts,
+    earningsAgg,
+    todayAgg,
+    weekAgg,
+    tipsAgg,
+    paidOutAgg,
+    pendingPayoutAgg,
+    recentBookings,
+    cancelledByProvider,
+  ] = await Promise.all([
+    Service.find({ provider: providerId })
+      .select("title price isActive serviceType carSize catalogKey")
+      .sort({ createdAt: 1 })
+      .lean(),
+    Rating.aggregate([
+      { $match: { provider: providerId } },
+      { $group: { _id: null, avg: { $avg: "$rating" }, count: { $sum: 1 } } },
+    ]),
+    Booking.aggregate([
+      { $match: { provider: providerId } },
+      { $group: { _id: "$status", count: { $sum: 1 } } },
+    ]),
+    Booking.aggregate([
+      { $match: { provider: providerId, status: "completed" } },
+      { $group: { _id: null, total: { $sum: "$finalPrice" } } },
+    ]),
+    Booking.aggregate([
+      {
+        $match: {
+          provider: providerId,
+          status: "completed",
+          completedAt: { $gte: todayStart },
+        },
+      },
+      { $group: { _id: null, total: { $sum: "$finalPrice" } } },
+    ]),
+    Booking.aggregate([
+      {
+        $match: {
+          provider: providerId,
+          status: "completed",
+          completedAt: { $gte: weekStart },
+        },
+      },
+      { $group: { _id: null, total: { $sum: "$finalPrice" } } },
+    ]),
+    paymentInfo.aggregate([
+      {
+        $match: {
+          providerId: new mongoose.Types.ObjectId(providerId),
+          type: "tips",
+          paymentStatus: "complete",
+        },
+      },
+      { $group: { _id: null, total: { $sum: "$price" } } },
+    ]),
+    Payout.aggregate([
+      { $match: { provider: providerId, status: "paid" } },
+      { $group: { _id: null, total: { $sum: "$amount" } } },
+    ]),
+    Payout.aggregate([
+      { $match: { provider: providerId, status: { $in: ["pending", "processing"] } } },
+      { $group: { _id: null, total: { $sum: "$amount" } } },
+    ]),
+    Booking.find({ provider: providerId })
+      .sort({ createdAt: -1 })
+      .limit(10)
+      .populate("user", "name photo")
+      .populate("service", "title")
+      .lean(),
+    Booking.countDocuments({
+      provider: providerId,
+      status: "cancelled",
+      cancelledBy: "provider",
+    }),
+  ]);
+
+  const counts = {};
+  statusCounts.forEach((row) => {
+    counts[row._id] = row.count;
+  });
+  const completedCount = counts.completed || 0;
+  const declinedCount = counts.declined || 0;
+  // Completion rate — DOCUMENT (Section H) wali formula:
+  // completed / (completed + provider-cancelled).
+  // Koi finished job hi na ho to null (panel "—" dikhayega).
+  const finishedForRate = completedCount + cancelledByProvider;
+  const completionRate =
+    finishedForRate > 0
+      ? Math.round((completedCount / finishedForRate) * 100)
+      : null;
+
+  const lifetimeGross = earningsAgg[0]?.total || 0;
+  const tipsTotal = r2(tipsAgg[0]?.total || 0);
+  const totalEarnings = r2(lifetimeGross * (1 - commissionRate) + tipsTotal);
+  const paidOut = r2(paidOutAgg[0]?.total || 0);
+  const pendingPayouts = r2(pendingPayoutAgg[0]?.total || 0);
+  const walletBalance = r2(
+    Math.max(0, totalEarnings - paidOut - pendingPayouts)
+  );
+
+  // Recent activity — completed bookings, payouts, reviews aur admin actions
+  // ko ek timeline me mila kar latest 10.
+  const [completedRecent, paidRecent, reviewsRecent, adminActions] =
+    await Promise.all([
+      Booking.find({ provider: providerId, status: "completed" })
+        .sort({ completedAt: -1 })
+        .limit(5)
+        .select("finalPrice completedAt createdAt")
+        .lean(),
+      Payout.find({ provider: providerId, status: "paid" })
+        .sort({ updatedAt: -1 })
+        .limit(3)
+        .select("amount updatedAt createdAt")
+        .lean(),
+      Rating.find({ provider: providerId })
+        .sort({ createdAt: -1 })
+        .limit(3)
+        .select("rating createdAt")
+        .lean(),
+      ActivityLog.find({ entityId: providerId })
+        .sort({ createdAt: -1 })
+        .limit(5)
+        .lean(),
+    ]);
+
+  const recentActivity = [
+    ...completedRecent.map((b) => ({
+      type: "booking_completed",
+      title: "Completed booking",
+      ref: `#${b._id.toString().slice(-6).toUpperCase()}`,
+      amount: b.finalPrice ?? null,
+      createdAt: b.completedAt || b.createdAt,
+    })),
+    ...paidRecent.map((p) => ({
+      type: "payout",
+      title: "Payout paid",
+      amount: p.amount ?? null,
+      createdAt: p.updatedAt || p.createdAt,
+    })),
+    ...reviewsRecent.map((r) => ({
+      type: "review",
+      title: "New review",
+      stars: r.rating ?? null,
+      createdAt: r.createdAt,
+    })),
+    ...adminActions.map((a) => ({
+      type: "admin_action",
+      title: a.action,
+      createdAt: a.createdAt,
+    })),
+  ]
+    .sort((x, y) => new Date(y.createdAt) - new Date(x.createdAt))
+    .slice(0, 10);
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Provider detail fetched successfully",
+    data: {
+      provider: maskProviderVerificationPayload(provider),
+      services,
+      stats: {
+        totalJobs: completedCount,
+        ratingAverage: ratingAgg[0] ? Number(ratingAgg[0].avg.toFixed(1)) : 0,
+        ratingCount: ratingAgg[0]?.count || 0,
+        completionRate,
+        counts: {
+          completed: completedCount,
+          cancelled: counts.cancelled || 0,
+          cancelledByProvider,
+          declined: declinedCount,
+          active:
+            (counts.pending || 0) +
+            (counts.accepted || 0) +
+            (counts.arrived || 0) +
+            (counts.ongoing || 0),
+        },
+      },
+      earnings: {
+        totalGross: r2(lifetimeGross),
+        totalEarnings,
+        todayNet: r2((todayAgg[0]?.total || 0) * (1 - commissionRate)),
+        weekNet: r2((weekAgg[0]?.total || 0) * (1 - commissionRate)),
+        tipsTotal,
+        paidOut,
+        pendingPayouts,
+        walletBalance,
+        commissionRate,
+      },
+      recentBookings: recentBookings.map((b) => ({
+        _id: b._id,
+        status: b.status,
+        bookingDate: b.bookingDate,
+        finalPrice: b.finalPrice,
+        price: b.price,
+        paymentStatus: b.payment?.status || null,
+        serviceTitle: b.service?.title || "Wash Service",
+        customerName: b.user?.name || "Customer",
+        customerPhoto: b.user?.photo?.url || "",
+        createdAt: b.createdAt,
+      })),
+      recentActivity,
+    },
+  });
+});
+
 
 export const getAdminServicesPricing = catchAsync(async (req, res) => {
   const [catalogServices, settings] = await Promise.all([

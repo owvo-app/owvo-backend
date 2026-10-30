@@ -74,6 +74,7 @@ import {
   updateDashboardSettings,
   updateProviderDailyWashLimit,
   updateProviderEnforcement,
+  getAdminProviderDetail,
   updateProviderVerification,
   updateStaffAccount,
   updateUserAccountStatus,
@@ -248,6 +249,7 @@ router.get(
   hasDashboardMenu("washers"),
   getExpiringInsurance
 );
+router.get("/providers/:id", protect, hasDashboardMenu("washers"), getAdminProviderDetail);
 router.post(
   "/providers/:id/send-verification-reminder",
   protect,
