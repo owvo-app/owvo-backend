@@ -1690,6 +1690,23 @@ export const getAdminProviderDetail = catchAsync(async (req, res) => {
     .sort((x, y) => new Date(y.createdAt) - new Date(x.createdAt))
     .slice(0, 10);
 
+  // Step 6 — Earnings/Bookings tabs: payout history + recent completed jobs
+  // (per-booking earnings table ke liye).
+  const [payoutHistory, recentCompletedJobs] = await Promise.all([
+    Payout.find({ provider: providerId })
+      .sort({ createdAt: -1 })
+      .limit(15)
+      .select("amount currency status payoutDate paidAt failureReason createdAt")
+      .lean(),
+    Booking.find({ provider: providerId, status: "completed" })
+      .sort({ completedAt: -1 })
+      .limit(15)
+      .populate("user", "name photo")
+      .populate("service", "title")
+      .select("finalPrice price bookingDate completedAt createdAt")
+      .lean(),
+  ]);
+
   sendResponse(res, {
     statusCode: httpStatus.OK,
     success: true,
@@ -1738,6 +1755,26 @@ export const getAdminProviderDetail = catchAsync(async (req, res) => {
         createdAt: b.createdAt,
       })),
       recentActivity,
+      payouts: payoutHistory.map((p) => ({
+        _id: p._id,
+        amount: p.amount,
+        currency: p.currency || "GBP",
+        status: p.status,
+        payoutDate: p.payoutDate || null,
+        paidAt: p.paidAt || null,
+        failureReason: p.failureReason || "",
+        createdAt: p.createdAt,
+      })),
+      completedJobs: recentCompletedJobs.map((b) => ({
+        _id: b._id,
+        ref: `#${b._id.toString().slice(-6).toUpperCase()}`,
+        serviceTitle: b.service?.title || "Wash Service",
+        customerName: b.user?.name || "Customer",
+        finalPrice: b.finalPrice,
+        bookingDate: b.bookingDate,
+        completedAt: b.completedAt,
+        createdAt: b.createdAt,
+      })),
     },
   });
 });
