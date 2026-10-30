@@ -21,6 +21,7 @@ import { UserRating } from "../model/userRating.model.js";
 import ProviderAcceptance from "../model/providerAcceptance.model.js";
 import { TrainingModule } from "../model/trainingModule.model.js";
 import { Notification } from "../model/notification.model.js";
+import { ProviderNote } from "../model/providerNote.model.js";
 import { uploadOnCloudinary } from "../utils/common.Method.js";
 import { emitToUser, broadcast } from "../socket/socket.js";
 import { notifyUser } from "../utils/fcm.util.js";
@@ -1779,6 +1780,237 @@ export const getAdminProviderDetail = catchAsync(async (req, res) => {
   });
 });
 
+
+// ─── Provider Notes, Send Message, Add Provider (Providers redesign — Step 7)
+const findProviderForPanel = async (id) => {
+  const provider = await User.findOne({
+    _id: id,
+    role: "provider",
+    isDeleted: { $ne: true },
+  });
+  if (!provider) {
+    throw new AppError(httpStatus.NOT_FOUND, "Provider not found");
+  }
+  return provider;
+};
+
+// POST /admin/providers — admin panel se naya provider account banana.
+// Provider baqi onboarding (documents, bank) app me khud complete karega;
+// account verification approve hone tak "Pending" rahega.
+export const createAdminProvider = catchAsync(async (req, res) => {
+  const name = String(req.body?.name || "").trim();
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  const phoneNumber = String(req.body?.phoneNumber || "").trim();
+  const password = String(req.body?.password || "");
+  const serviceArea = String(req.body?.serviceArea || "").trim();
+
+  if (!name) {
+    throw new AppError(httpStatus.BAD_REQUEST, "Provider name is required");
+  }
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new AppError(httpStatus.BAD_REQUEST, "A valid email address is required");
+  }
+  if (!phoneNumber) {
+    throw new AppError(httpStatus.BAD_REQUEST, "Phone number is required");
+  }
+  if (!password || password.length < 6) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "Password must be at least 6 characters"
+    );
+  }
+
+  const existingEmail = await User.findOne({ email });
+  if (existingEmail) {
+    throw new AppError(
+      httpStatus.CONFLICT,
+      "An account with this email already exists"
+    );
+  }
+  const existingPhone = await User.findOne({ phoneNumber });
+  if (existingPhone) {
+    throw new AppError(
+      httpStatus.CONFLICT,
+      "An account with this phone number already exists"
+    );
+  }
+
+  let provider;
+  try {
+    provider = await User.create({
+      name,
+      email,
+      phoneNumber,
+      password,
+      role: "provider",
+      serviceArea,
+    });
+  } catch (error) {
+    if (error?.code === 11000) {
+      throw new AppError(
+        httpStatus.CONFLICT,
+        "An account with this email or phone number already exists"
+      );
+    }
+    throw error;
+  }
+
+  await recordActivity({
+    req,
+    action: "provider.created_by_admin",
+    entityType: "user",
+    entityId: provider._id,
+    metadata: { email: provider.email },
+  });
+
+  sendResponse(res, {
+    statusCode: httpStatus.CREATED,
+    success: true,
+    message: "Provider created successfully",
+    data: {
+      _id: provider._id,
+      name: provider.name,
+      email: provider.email,
+      phoneNumber: provider.phoneNumber,
+      serviceArea: provider.serviceArea,
+      role: provider.role,
+      createdAt: provider.createdAt,
+    },
+  });
+});
+
+// GET /admin/providers/:id/notes — admin team ke private notes (provider ko
+// kabhi nazar nahi ate).
+export const getProviderNotes = catchAsync(async (req, res) => {
+  const provider = await findProviderForPanel(req.params.id);
+  const notes = await ProviderNote.find({ provider: provider._id })
+    .populate("author", "name role")
+    .sort({ createdAt: -1 })
+    .limit(100)
+    .lean();
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Provider notes fetched successfully",
+    data: notes.map((note) => ({
+      _id: note._id,
+      text: note.text,
+      authorName: note.author?.name || "Admin",
+      authorRole: note.author?.role || "",
+      createdAt: note.createdAt,
+    })),
+  });
+});
+
+// POST /admin/providers/:id/notes
+export const addProviderNote = catchAsync(async (req, res) => {
+  const provider = await findProviderForPanel(req.params.id);
+  const text = String(req.body?.text || "").trim();
+  if (!text) {
+    throw new AppError(httpStatus.BAD_REQUEST, "Note text is required");
+  }
+  if (text.length > 2000) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "Note is too long (maximum 2000 characters)"
+    );
+  }
+  const note = await ProviderNote.create({
+    provider: provider._id,
+    author: req.user._id,
+    text,
+  });
+  await recordActivity({
+    req,
+    action: "provider.note_added",
+    entityType: "user",
+    entityId: provider._id,
+    metadata: { noteId: note._id },
+  });
+  sendResponse(res, {
+    statusCode: httpStatus.CREATED,
+    success: true,
+    message: "Note added",
+    data: {
+      _id: note._id,
+      text: note.text,
+      authorName: req.user.name || "Admin",
+      authorRole: req.user.role || "",
+      createdAt: note.createdAt,
+    },
+  });
+});
+
+// DELETE /admin/providers/:id/notes/:noteId
+export const deleteProviderNote = catchAsync(async (req, res) => {
+  const provider = await findProviderForPanel(req.params.id);
+  const note = await ProviderNote.findOne({
+    _id: req.params.noteId,
+    provider: provider._id,
+  });
+  if (!note) {
+    throw new AppError(httpStatus.NOT_FOUND, "Note not found");
+  }
+  await note.deleteOne();
+  await recordActivity({
+    req,
+    action: "provider.note_deleted",
+    entityType: "user",
+    entityId: provider._id,
+    metadata: { noteId: note._id },
+  });
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Note deleted",
+    data: { _id: note._id },
+  });
+});
+
+// POST /admin/providers/:id/message — provider ko message: app inbox me save
+// (Notification) + FCM push. Verification wale flow wala hi pattern.
+export const sendProviderMessage = catchAsync(async (req, res) => {
+  const provider = await findProviderForPanel(req.params.id);
+  const title = String(req.body?.title || "").trim() || "Message from OWVO";
+  const message = String(req.body?.message || "").trim();
+  if (!message) {
+    throw new AppError(httpStatus.BAD_REQUEST, "Message is required");
+  }
+  if (message.length > 1000) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "Message is too long (maximum 1000 characters)"
+    );
+  }
+
+  await Notification.create({
+    recipient: provider._id,
+    type: "general",
+    title,
+    message,
+    sentBy: req.user._id,
+    metadata: { source: "admin_panel" },
+  });
+  notifyUser(provider._id.toString(), {
+    title,
+    body: message,
+    data: { type: "admin_message" },
+  });
+  await recordActivity({
+    req,
+    action: "provider.message_sent",
+    entityType: "user",
+    entityId: provider._id,
+    metadata: { title },
+  });
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Message sent to provider",
+    data: { providerId: provider._id },
+  });
+});
 
 export const getAdminServicesPricing = catchAsync(async (req, res) => {
   const [catalogServices, settings] = await Promise.all([

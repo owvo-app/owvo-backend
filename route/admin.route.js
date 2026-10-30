@@ -76,6 +76,11 @@ import {
   updateProviderEnforcement,
   getAdminProviderDetail,
   deleteAdminProvider,
+  createAdminProvider,
+  getProviderNotes,
+  addProviderNote,
+  deleteProviderNote,
+  sendProviderMessage,
   updateProviderVerification,
   updateStaffAccount,
   updateUserAccountStatus,
@@ -252,6 +257,11 @@ router.get(
 );
 router.get("/providers/:id", protect, hasDashboardMenu("washers"), getAdminProviderDetail);
 router.delete("/providers/:id", protect, isAdmin, deleteAdminProvider);
+router.post("/providers", protect, isAdmin, createAdminProvider);
+router.get("/providers/:id/notes", protect, hasDashboardMenu("washers"), getProviderNotes);
+router.post("/providers/:id/notes", protect, hasDashboardMenu("washers"), addProviderNote);
+router.delete("/providers/:id/notes/:noteId", protect, hasDashboardMenu("washers"), deleteProviderNote);
+router.post("/providers/:id/message", protect, hasDashboardMenu("washers"), sendProviderMessage);
 router.post(
   "/providers/:id/send-verification-reminder",
   protect,
