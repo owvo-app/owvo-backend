@@ -1342,6 +1342,110 @@ export const createAdminBooking = catchAsync(async (req, res) => {
 });
 
 
+// ─── Bookings redesign: list filters (list + CSV export shared) ───
+// rangeBase sirf date-range + provider/customer scope rakhta hai — summary
+// cards aur location options ISI par bante hain taake woh kabhi adhoori
+// page-list se gin kar ghalat na hon. filter us par baqi conditions jodta hai.
+const bkEscapeRegex = (value) =>
+  String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const bkBaseFilter = (query) => {
+  const { providerId, customerId, from, to } = query;
+  const base = {};
+  if (providerId && mongoose.Types.ObjectId.isValid(providerId)) {
+    base.provider = providerId;
+  }
+  if (customerId && mongoose.Types.ObjectId.isValid(customerId)) {
+    base.user = customerId;
+  }
+  if (from || to) {
+    base.bookingDate = {};
+    if (from) base.bookingDate.$gte = new Date(from);
+    if (to) base.bookingDate.$lte = new Date(to);
+  } else {
+    Object.assign(base, dateFilter("bookingDate", query));
+  }
+  return base;
+};
+
+const bkBuildBookingFilters = async (query) => {
+  const rangeBase = bkBaseFilter(query);
+  const filter = bkBaseFilter(query);
+
+  if (query.status && BOOKING_STATUSES.includes(query.status)) {
+    filter.status = query.status;
+  }
+  if (query.serviceId && mongoose.Types.ObjectId.isValid(query.serviceId)) {
+    filter.service = query.serviceId;
+  }
+  if (["paid", "pending", "failed"].includes(query.paymentStatus)) {
+    filter["payment.status"] = query.paymentStatus;
+  }
+  if (query.paymentStatus === "refunded") {
+    filter["refund.status"] = "refunded";
+  }
+  if (query.location) {
+    const outward = String(query.location)
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, "")
+      .slice(0, 4);
+    if (outward) filter.postalCode = { $regex: `^${outward}` };
+  }
+  // Specific day filter (More Filters) — range ko replace karta hai.
+  if (query.day && /^\d{4}-\d{2}-\d{2}$/.test(String(query.day))) {
+    const start = new Date(`${query.day}T00:00:00.000Z`);
+    filter.bookingDate = {
+      $gte: start,
+      $lt: new Date(start.getTime() + 24 * 3600 * 1000),
+    };
+  }
+  if (query.disputed === "1" || query.disputed === "true") {
+    const disputedIds = await SupportTicket.find({
+      type: "dispute",
+      status: { $in: ["open", "in_progress"] },
+    }).distinct("booking");
+    filter._id = { $in: disputedIds };
+  }
+
+  const search = String(query.search || "").trim();
+  if (search) {
+    const rx = new RegExp(bkEscapeRegex(search), "i");
+    const orParts = [{ postalCode: rx }];
+    const matchedUsers = await User.find({
+      $or: [{ name: rx }, { phoneNumber: rx }, { email: rx }],
+    })
+      .select("_id")
+      .lean();
+    if (matchedUsers.length) {
+      const ids = matchedUsers.map((u) => u._id);
+      orParts.push({ user: { $in: ids } }, { provider: { $in: ids } });
+    }
+    if (mongoose.Types.ObjectId.isValid(search)) {
+      orParts.push({ _id: new mongoose.Types.ObjectId(search) });
+    }
+    // Short booking ID (last 6) se bhi search — sirf tab jab candidate set
+    // chhota ho, warna full scan mehenga padta hai.
+    if (/^[0-9a-fA-F]{6}$/.test(search)) {
+      const candidates = await Booking.find(rangeBase)
+        .select("_id")
+        .limit(2001)
+        .lean();
+      if (candidates.length <= 2000) {
+        const suffixIds = candidates
+          .filter((c) =>
+            c._id.toString().toLowerCase().endsWith(search.toLowerCase())
+          )
+          .map((c) => c._id);
+        if (suffixIds.length) orParts.push({ _id: { $in: suffixIds } });
+      }
+    }
+    filter.$or = orParts;
+  }
+
+  return { filter, rangeBase };
+};
+
+
 export const getAdminBookings = catchAsync(async (req, res) => {
   const { limit = 50, page = 1 } = req.query;
   const { filter, rangeBase } = await bkBuildBookingFilters(req.query);
