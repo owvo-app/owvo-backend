@@ -19,6 +19,16 @@ import {
 
 import {
   createAdminPayout,
+  getAdminTransactions,
+  getAdminTransactionDetail,
+  createAdminTransactionNote,
+  getAdminTransactionNotes,
+  getAdminRefunds,
+  decideAdminRefund,
+  processAdminRefund,
+  retryAdminPayout,
+  payAdminPayoutManually,
+  getAdminReconciliation,
   createAdminCommissionWithdrawal,
   createStaffAccount,
   deleteStaffAccount,
@@ -181,6 +191,18 @@ router.get("/earnings", protect, hasDashboardMenu("earnings"), getAdminEarnings)
 router.get("/payouts", protect, hasDashboardMenu("payouts-payments"), getAdminPayouts);
 router.post("/payouts", protect, isAdmin, createAdminPayout);
 router.patch("/payouts/:payoutId/status", protect, isAdmin, updateAdminPayoutStatus);
+
+// Payments & Refunds — unified (Payments phase)
+router.get("/transactions", protect, hasDashboardMenu("payouts-payments"), getAdminTransactions);
+router.get("/transactions/:sourceType/:id", protect, hasDashboardMenu("payouts-payments"), getAdminTransactionDetail);
+router.get("/transactions/:sourceType/:id/notes", protect, hasDashboardMenu("payouts-payments"), getAdminTransactionNotes);
+router.post("/transactions/notes", protect, hasDashboardMenu("payouts-payments"), createAdminTransactionNote);
+router.get("/refunds", protect, hasDashboardMenu("payouts-payments"), getAdminRefunds);
+router.post("/refunds/:id/decide", protect, isAdmin, decideAdminRefund);
+router.post("/refunds/:id/process", protect, isAdmin, processAdminRefund);
+router.post("/payouts/:id/retry", protect, isAdmin, retryAdminPayout);
+router.post("/payouts/:id/pay-manually", protect, isAdmin, payAdminPayoutManually);
+router.get("/reconciliation", protect, hasDashboardMenu("payouts-payments"), getAdminReconciliation);
 router.get("/commission-withdrawals", protect, hasDashboardMenu("payouts-payments"), getAdminCommissionWithdrawals);
 router.post("/commission-withdrawals", protect, isAdmin, createAdminCommissionWithdrawal);
 

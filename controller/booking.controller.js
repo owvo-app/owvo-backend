@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import AppError from "../errors/AppError.js";
 import { Addon } from "../model/addon.model.js";
 import { Booking } from "../model/booking.model.js";
+import { applyCommissionSnapshot } from "../utils/money.util.js";
 import { Coupon } from "../model/coupon.model.js";
 import { Receipt } from "../model/receipt.model.js";
 import { Service } from "../model/service.model.js";
@@ -507,6 +508,10 @@ export const updateBookingStatus = catchAsync(async (req, res) => {
   }
 
   booking.status = status;
+  if (status === "completed") {
+    // Commission snapshot — complete hone ke lamhe ka rate pakka.
+    await applyCommissionSnapshot(booking);
+  }
   if (status === "arrived" && !booking.arrivedAt) {
     booking.arrivedAt = new Date();
     booking.washEndsAt = new Date(booking.arrivedAt.getTime() + 30 * 60 * 1000);

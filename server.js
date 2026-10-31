@@ -4,6 +4,7 @@ import express from "express";
 import { createServer } from "http";
 import mongoose from "mongoose";
 import { washerDailyResetCron } from "./cron/washer.cron.js";
+import { payoutCron } from "./cron/payout.cron.js";
 import router from "./mainroute/index.js";
 import globalErrorHandler from "./middleware/globalErrorHandler.js";
 import { securityHeaders, simpleRateLimit } from "./middleware/security.middleware.js";
@@ -20,6 +21,7 @@ validateAuthConfiguration();
 const app = express();
 
 washerDailyResetCron();
+payoutCron();
 
 app.set("trust proxy", true);
 const server = createServer(app);

@@ -96,7 +96,7 @@ const bookingSchema = new mongoose.Schema(
     payment: {
       method: {
         type: String,
-        enum: ["online"],
+        enum: ["online", "wallet", "split"],
         default: "online",
       },
       status: {
@@ -107,6 +107,10 @@ const bookingSchema = new mongoose.Schema(
       trxId: {
         type: String,
       },
+      // Wallet/Card split (Payments phase) — refund asal raaste par
+      // wapas bhejne ke liye dono hisse record rehte hain.
+      walletAmount: { type: Number, default: 0 },
+      cardAmount: { type: Number, default: 0 },
     },
     status: {
       type: String,
@@ -158,6 +162,11 @@ const bookingSchema = new mongoose.Schema(
         default: null,
       },
     },
+    // Commission snapshot (Payments phase) — booking complete hone
+    // par us lamhe ka rate hamesha ke liye; null = abhi snapshot nahi.
+    commissionRate: { type: Number, default: null },
+    commissionAmount: { type: Number, default: null },
+    providerNetAmount: { type: Number, default: null },
     isRated: {
       type: Boolean,
       default: false,

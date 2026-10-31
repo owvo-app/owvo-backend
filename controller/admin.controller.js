@@ -10,6 +10,18 @@ import { createToken } from "../utils/authToken.js";
 import { sendEmail } from "../utils/sendEmail.js";
 import catchAsync from "../utils/catch.Async.js";
 import { Booking } from "../model/booking.model.js";
+import {
+  applyCommissionSnapshot,
+  applyEarningReversal,
+  computeProviderBalances,
+  getUnpaidBookingEarnings,
+  syncBookingRefundSummary,
+} from "../utils/money.util.js";
+import { attemptPayoutTransfer } from "../utils/payout.util.js";
+import { Refund } from "../model/refund.model.js";
+import { Wallet } from "../model/wallet.model.js";
+import { WalletTransaction } from "../model/walletTransaction.model.js";
+import { TransactionNote } from "../model/transactionNote.model.js";
 import { IssueReport } from "../model/issueReport.model.js";
 import { ActivityLog } from "../model/activityLog.model.js";
 import { Receipt } from "../model/receipt.model.js";
@@ -607,12 +619,22 @@ export const getDashboardOverview = catchAsync(async (req, res) => {
   const todayRevenue = asMoney(todayRevenueAgg[0]?.total);
   const weekRevenue = asMoney(weekRevenueAgg[0]?.total);
   const monthRevenue = asMoney(monthRevenueAgg[0]?.total);
-  const pendingPayoutAmount = asMoney(
-    completedBookingsForPayout.reduce(
-      (sum, booking) => sum + (Number(booking.finalPrice) || 0) * (1 - commissionRate),
-      0
-    )
-  );
+  // Pending payouts = is waqt asal payable (money.util ka unified
+  // hisaab) — date range ka asar nahi, jo payout ho chuka woh
+  // ghata hua. Providers page wale number se hamesha mile ga.
+  const payoutProviderIds = await Booking.distinct("provider", {
+    status: "completed",
+  });
+  let pendingPayoutAmount = 0;
+  let pendingPayoutProviders = 0;
+  for (const pid of payoutProviderIds) {
+    if (!pid) continue;
+    const balances = await computeProviderBalances(pid);
+    if (balances.available > 0) {
+      pendingPayoutAmount = asMoney(pendingPayoutAmount + balances.available);
+      pendingPayoutProviders += 1;
+    }
+  }
   const platformBalance = asMoney(totalRevenue * commissionRate);
 
   sendResponse(res, {
@@ -630,7 +652,7 @@ export const getDashboardOverview = catchAsync(async (req, res) => {
       pendingReports,
       pendingPayouts: {
         amount: pendingPayoutAmount,
-        count: completedBookingsForPayout.length,
+        count: pendingPayoutProviders,
       },
       platformBalance,
       commissionRate,
@@ -1839,6 +1861,10 @@ export const updateAdminBookingStatus = catchAsync(async (req, res) => {
   }
 
   booking.status = status;
+  if (status === "completed") {
+    // Commission snapshot — complete hone ke lamhe ka rate pakka.
+    await applyCommissionSnapshot(booking);
+  }
   if (status === "arrived" && !booking.arrivedAt) {
     booking.arrivedAt = new Date();
     booking.washEndsAt = new Date(booking.arrivedAt.getTime() + 30 * 60 * 1000);
@@ -2316,12 +2342,12 @@ export const getAdminProviderDetail = catchAsync(async (req, res) => {
 
   const lifetimeGross = earningsAgg[0]?.total || 0;
   const tipsTotal = r2(tipsAgg[0]?.total || 0);
-  const totalEarnings = r2(lifetimeGross * (1 - commissionRate) + tipsTotal);
-  const paidOut = r2(paidOutAgg[0]?.total || 0);
-  const pendingPayouts = r2(pendingPayoutAgg[0]?.total || 0);
-  const walletBalance = r2(
-    Math.max(0, totalEarnings - paidOut - pendingPayouts)
-  );
+  // Unified hisaab (money.util) — snapshot + tips − refunds − holds.
+  const providerBalances = await computeProviderBalances(providerId);
+  const totalEarnings = r2(providerBalances.net + providerBalances.tips);
+  const paidOut = r2(providerBalances.paidOut);
+  const pendingPayouts = r2(providerBalances.allocated);
+  const walletBalance = r2(providerBalances.available);
 
   // Recent activity — completed bookings, payouts, reviews aur admin actions
   // ko ek timeline me mila kar latest 10.
@@ -4224,8 +4250,16 @@ export const getAdminEarnings = catchAsync(async (req, res) => {
 
   const entries = bookings.map((booking) => {
     const grossAmount = asMoney(booking.finalPrice);
-    const commissionAmount = asMoney(grossAmount * commissionRate);
-    const netAmount = asMoney(grossAmount - commissionAmount);
+    // Snapshot ho to wohi rate jo booking complete hone par laga tha.
+    const hasSnapshot =
+      booking.providerNetAmount !== null &&
+      booking.providerNetAmount !== undefined;
+    const commissionAmount = hasSnapshot
+      ? asMoney(booking.commissionAmount)
+      : asMoney(grossAmount * commissionRate);
+    const netAmount = hasSnapshot
+      ? asMoney(booking.providerNetAmount)
+      : asMoney(grossAmount - commissionAmount);
 
     return {
       bookingId: booking._id,
@@ -4234,7 +4268,7 @@ export const getAdminEarnings = catchAsync(async (req, res) => {
       provider: booking.provider,
       service: booking.service,
       grossAmount,
-      commissionRate,
+      commissionRate: hasSnapshot ? booking.commissionRate : commissionRate,
       commissionAmount,
       netAmount,
       currency: booking.currency || "GBP",
@@ -4422,6 +4456,7 @@ export const createAdminPayout = catchAsync(async (req, res) => {
     payoutDate,
     status = "paid",
     manualAdjustmentReason = "",
+    autoAttempt = false,
   } = req.body || {};
   const payoutAmount = asMoney(amount);
   const payoutCurrency = currency.toString().trim().toUpperCase() || "GBP";
@@ -4443,30 +4478,11 @@ export const createAdminPayout = catchAsync(async (req, res) => {
     throw new AppError(httpStatus.NOT_FOUND, "Provider record not found");
   }
 
-  const settings = await getPlatformSettingsDoc();
-  const commissionRate = Number(settings.commissionRate) || 0.25;
-  const [grossAgg, allocatedAgg] = await Promise.all([
-    Booking.aggregate([
-      { $match: { provider: provider._id, status: "completed" } },
-      { $group: { _id: null, total: { $sum: "$finalPrice" } } },
-    ]),
-    // "paid" aur "pending"/"processing" dono ginte hain — warna admin
-    // ek hi paisa do payouts mein bhej sakta hai (pehla abhi queue mein
-    // hai, dusra usi balance ko phir se "available" samajh kar ban jaye).
-    Payout.aggregate([
-      {
-        $match: {
-          provider: provider._id,
-          status: { $in: ["paid", "pending", "processing"] },
-        },
-      },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
-    ]),
-  ]);
-  const grossAmount = asMoney(grossAgg[0]?.total);
-  const netEarned = asMoney(grossAmount * (1 - commissionRate));
-  const alreadyAllocated = asMoney(allocatedAgg[0]?.total);
-  const payableAmount = asMoney(Math.max(netEarned - alreadyAllocated, 0));
+  // Unified hisaab (money.util): snapshot earnings + tips − refunds
+  // − dispute holds − pehle ke payouts (bonus alag). Admin is se
+  // zyada ka payout nahi bana sakta — double-pay namumkin.
+  const balances = await computeProviderBalances(provider._id);
+  const payableAmount = balances.available;
 
   if (payoutAmount > payableAmount) {
     throw new AppError(
@@ -4475,7 +4491,9 @@ export const createAdminPayout = catchAsync(async (req, res) => {
     );
   }
 
-  const payout = await Payout.create({
+  const unpaidRows = await getUnpaidBookingEarnings(provider._id);
+
+  let payout = await Payout.create({
     provider: provider._id,
     amount: payoutAmount,
     currency: payoutCurrency,
@@ -4484,12 +4502,32 @@ export const createAdminPayout = catchAsync(async (req, res) => {
     paidAt: status === "paid" ? new Date() : undefined,
     stripeDestinationAccountId: "",
     stripeMode: "manual",
+    mode: "manual",
+    source: "booking",
+    bookingIds: unpaidRows
+      .filter((row) => !row.held)
+      .map((row) => row.bookingId),
     manualAdjustmentReason:
       manualAdjustmentReason?.toString?.().trim() ||
-      "Manual provider salary marked paid by admin",
+      "Manual provider payout recorded by admin",
+    attempts: [
+      {
+        action: "admin_created",
+        result: status,
+        note: manualAdjustmentReason?.toString?.().trim() || "",
+        by: req.user._id,
+      },
+    ],
     createdBy: req.user._id,
     updatedBy: req.user._id,
   });
+
+  // Admin chahe to pending payout par foran automatic transfer ki
+  // koshish bhi ho jaye (Connect tayyar ho tab hi kuch hota hai).
+  if (autoAttempt && status === "pending") {
+    const attempt = await attemptPayoutTransfer(payout);
+    payout = attempt.payout;
+  }
 
   await recordActivity({
     req,
@@ -4500,7 +4538,7 @@ export const createAdminPayout = catchAsync(async (req, res) => {
       providerId,
       amount: payoutAmount,
       status: payout.status,
-      stripeMode: "manual",
+      stripeMode: payout.stripeMode,
     },
   });
   broadcast("admin_payout_updated", { payoutId: payout._id, status: payout.status });
@@ -4530,10 +4568,47 @@ export const updateAdminPayoutStatus = catchAsync(async (req, res) => {
     throw new AppError(httpStatus.NOT_FOUND, "Payout not found");
   }
 
+  // Transition matrix — paid final hai; automatic processing ke
+  // darmiyan haath se paid karna double-pay ka khatra hai (block).
+  const from = payout.status;
+  const allowed = {
+    pending: ["processing", "paid", "failed"],
+    processing: payout.mode === "auto" ? [] : ["paid", "failed"],
+    failed: ["pending", "paid"],
+    paid: [],
+  };
+  if (from === status) {
+    throw new AppError(httpStatus.BAD_REQUEST, `Payout is already ${status}.`);
+  }
+  if (!(allowed[from] || []).includes(status)) {
+    if (from === "processing" && payout.mode === "auto") {
+      throw new AppError(
+        httpStatus.CONFLICT,
+        "This payout is being processed by Stripe — wait for its result before taking any action (marking it paid by hand could pay the provider twice)."
+      );
+    }
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      `A ${from} payout cannot be changed to ${status}.`
+    );
+  }
+  if (status === "failed" && !failureReason.toString().trim()) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "A reason is required when marking a payout as failed."
+    );
+  }
+
   payout.status = status;
   payout.failureReason = status === "failed" ? failureReason.toString().trim() : "";
   payout.paidAt = status === "paid" ? new Date() : payout.paidAt;
   payout.updatedBy = req.user._id;
+  payout.attempts.push({
+    action: `status_${from}_to_${status}`,
+    result: status,
+    note: status === "failed" ? payout.failureReason : "",
+    by: req.user._id,
+  });
   await payout.save();
 
   await recordActivity({
@@ -4645,18 +4720,28 @@ export const createAdminCommissionWithdrawal = catchAsync(async (req, res) => {
     throw new AppError(httpStatus.BAD_REQUEST, "Withdrawal amount must be greater than 0");
   }
 
-  const [allCompletedAgg, allWithdrawnAgg] = await Promise.all([
-    Booking.aggregate([
-      { $match: { status: "completed" } },
-      { $group: { _id: null, total: { $sum: "$finalPrice" } } },
-    ]),
+  const [completedForCommission, allWithdrawnAgg] = await Promise.all([
+    Booking.find({ status: "completed" })
+      .select("finalPrice commissionAmount")
+      .lean(),
     AdminWithdrawal.aggregate([
       { $match: { status: { $ne: "failed" } } },
       { $group: { _id: null, total: { $sum: "$amount" } } },
     ]),
   ]);
 
-  const allCommission = asMoney((allCompletedAgg[0]?.total || 0) * commissionRate);
+  // Commission snapshot par — rate badalne se purani kamai nahi badalti.
+  const allCommission = asMoney(
+    completedForCommission.reduce(
+      (sum, booking) =>
+        sum +
+        (booking.commissionAmount !== null &&
+        booking.commissionAmount !== undefined
+          ? Number(booking.commissionAmount) || 0
+          : (Number(booking.finalPrice) || 0) * commissionRate),
+      0
+    )
+  );
   const allWithdrawn = asMoney(allWithdrawnAgg[0]?.total);
   const availableCommission = asMoney(Math.max(allCommission - allWithdrawn, 0));
 
@@ -5999,6 +6084,177 @@ export const sendAdminBookingNotification = catchAsync(async (req, res) => {
 // Poori rakam ka refund: booking ki completed payment entry ke Stripe
 // PaymentIntent par. Booking ka status NAHI badalta; refund booking.refund
 // me record hota hai aur har jagah "Refunded" dikhta hai.
+const REFUND_REASON_CATEGORIES = [
+  "service_not_as_described",
+  "provider_no_show",
+  "customer_cancelled",
+  "duplicate_charge",
+  "quality_issue",
+  "other",
+];
+
+// Refund execute karne ka asal kaam — admin ka direct refund aur
+// customer request ki approval dono yahi istemal karte hain.
+// Hisse (wallet/card) booking ki asal payment se tay hote hain:
+// card hissa Stripe se wapas, wallet hissa foran wallet credit.
+// Cumulative cap: pehle hue refunds ke baad bachi raqam se zyada
+// kabhi refund nahi hota. Stripe fail ho to record "approved" par
+// ruk jata hai taake admin dobara koshish kar sake.
+const executeRefund = async (refund, actorId) => {
+  const booking = await Booking.findById(refund.booking);
+  if (!booking) {
+    throw new AppError(httpStatus.NOT_FOUND, "Booking not found for this refund.");
+  }
+
+  const record = await paymentInfo
+    .findOne({
+      bookingId: booking._id,
+      type: "booking",
+      paymentStatus: "complete",
+    })
+    .sort({ createdAt: -1 });
+
+  const priorAgg = await Refund.aggregate([
+    {
+      $match: {
+        booking: booking._id,
+        status: "refunded",
+        _id: { $ne: refund._id },
+      },
+    },
+    {
+      $group: {
+        _id: null,
+        total: { $sum: "$amount" },
+        walletTotal: { $sum: "$walletPortion" },
+      },
+    },
+  ]);
+  const alreadyRefunded = asMoney(priorAgg[0]?.total || 0);
+  const walletAlreadyRefunded = asMoney(priorAgg[0]?.walletTotal || 0);
+  const captured = record
+    ? asMoney(record.price)
+    : asMoney(booking.finalPrice || booking.price || 0);
+  const remaining = asMoney(captured - alreadyRefunded);
+
+  if (!refund.amount || refund.amount <= 0 || refund.amount > remaining + 0.001) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      `Refund amount must be between £0.01 and £${remaining.toFixed(2)} (the amount still refundable for this booking).`
+    );
+  }
+
+  const walletPaidTotal = record
+    ? asMoney(record.walletAmount || 0)
+    : asMoney(booking.payment?.walletAmount || 0);
+  const walletPortion = asMoney(
+    Math.min(refund.amount, Math.max(walletPaidTotal - walletAlreadyRefunded, 0))
+  );
+  const cardPortion = asMoney(refund.amount - walletPortion);
+
+  refund.walletPortion = walletPortion;
+  refund.cardPortion = cardPortion;
+  if (record) refund.payment = record._id;
+
+  // Card hissa — Stripe se.
+  if (cardPortion > 0) {
+    const transactionId = record?.transactionId || booking.payment?.trxId;
+    if (!transactionId || !String(transactionId).startsWith("pi_")) {
+      throw new AppError(
+        httpStatus.BAD_REQUEST,
+        "No card payment was found for this booking to refund."
+      );
+    }
+    refund.stripePaymentIntentId = transactionId;
+    try {
+      const stripeRefund = await getStripe().refunds.create({
+        payment_intent: transactionId,
+        amount: Math.round(cardPortion * 100),
+      });
+      refund.stripeRefundId = stripeRefund.id;
+    } catch (err) {
+      refund.status = "approved";
+      await refund.save();
+      throw new AppError(
+        httpStatus.BAD_GATEWAY,
+        `Stripe refund failed: ${err?.message || "unknown error"}`
+      );
+    }
+  }
+
+  // Wallet hissa — foran credit.
+  if (walletPortion > 0) {
+    const wallet = await Wallet.findOneAndUpdate(
+      { user: booking.user },
+      { $setOnInsert: { user: booking.user } },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+    const credited = await Wallet.findByIdAndUpdate(
+      wallet._id,
+      { $inc: { balance: walletPortion } },
+      { new: true }
+    );
+    await WalletTransaction.create({
+      wallet: wallet._id,
+      user: booking.user,
+      type: "refund_credit",
+      amount: walletPortion,
+      balanceAfter: credited.balance,
+      booking: booking._id,
+      refund: refund._id,
+      status: "complete",
+    });
+  }
+
+  refund.status = "refunded";
+  refund.refundedAt = new Date();
+  if (actorId && !refund.decidedBy) {
+    refund.decidedBy = actorId;
+    refund.decidedAt = new Date();
+  }
+  await refund.save();
+
+  await applyEarningReversal(refund);
+  await syncBookingRefundSummary(booking._id, actorId || null);
+
+  await recordActivity(
+    actorId,
+    "booking.refunded",
+    "Booking",
+    booking._id,
+    `Refunded £${refund.amount.toFixed(2)} for booking ${booking._id}`,
+    { refundId: refund._id.toString(), stripeRefundId: refund.stripeRefundId || "", amount: refund.amount }
+  );
+
+  try {
+    const parts = [];
+    if (walletPortion > 0) {
+      parts.push(`£${walletPortion.toFixed(2)} has been credited to your OWVO wallet`);
+    }
+    if (cardPortion > 0) {
+      parts.push(`£${cardPortion.toFixed(2)} will return to your card in 3–10 working days`);
+    }
+    const message = `A refund of £${refund.amount.toFixed(2)} has been processed for your booking. ${parts.join(". ")}.`;
+    await Notification.create({
+      recipient: booking.user,
+      type: "general",
+      title: "Refund processed",
+      message,
+      sentBy: actorId || undefined,
+      metadata: { bookingId: booking._id },
+    });
+    notifyUser(booking.user.toString(), {
+      title: "Refund processed",
+      body: message,
+      data: { type: "booking_refunded", bookingId: booking._id.toString() },
+    });
+  } catch (e) {
+    /* notifications best effort */
+  }
+
+  return refund;
+};
+
 export const refundAdminBooking = catchAsync(async (req, res) => {
   const booking = await bkLoadBookingOr404(req.params.id);
 
@@ -6006,12 +6262,6 @@ export const refundAdminBooking = catchAsync(async (req, res) => {
     throw new AppError(
       httpStatus.BAD_REQUEST,
       "This booking has not been paid — there is nothing to refund."
-    );
-  }
-  if (booking.refund?.status === "refunded") {
-    throw new AppError(
-      httpStatus.BAD_REQUEST,
-      "This booking has already been refunded."
     );
   }
 
@@ -6022,74 +6272,51 @@ export const refundAdminBooking = catchAsync(async (req, res) => {
       paymentStatus: "complete",
     })
     .sort({ createdAt: -1 });
-  const transactionId = record?.transactionId || booking.payment?.trxId;
-  if (!record || !transactionId) {
+  const priorAgg = await Refund.aggregate([
+    { $match: { booking: booking._id, status: "refunded" } },
+    { $group: { _id: null, total: { $sum: "$amount" } } },
+  ]);
+  const captured = record
+    ? asMoney(record.price)
+    : asMoney(booking.finalPrice || booking.price || 0);
+  const remaining = asMoney(captured - asMoney(priorAgg[0]?.total || 0));
+  if (remaining <= 0) {
     throw new AppError(
       httpStatus.BAD_REQUEST,
-      "No completed Stripe payment was found for this booking."
-    );
-  }
-  const amountGbp = Number(record.price) || 0;
-  if (amountGbp <= 0) {
-    throw new AppError(
-      httpStatus.BAD_REQUEST,
-      "The recorded payment amount is invalid."
+      "This booking has already been fully refunded."
     );
   }
 
-  let stripeRefund;
-  try {
-    stripeRefund = await getStripe().refunds.create({
-      payment_intent: transactionId,
-      amount: Math.round(amountGbp * 100),
-    });
-  } catch (err) {
+  const amount =
+    req.body?.amount !== undefined && req.body?.amount !== null
+      ? asMoney(req.body.amount)
+      : remaining;
+  if (!amount || amount <= 0 || amount > remaining) {
     throw new AppError(
-      httpStatus.BAD_GATEWAY,
-      `Stripe refund failed: ${err?.message || "unknown error"}`
+      httpStatus.BAD_REQUEST,
+      `Refund amount must be between £0.01 and £${remaining.toFixed(2)}.`
     );
   }
 
-  booking.refund = {
-    status: "refunded",
-    amount: amountGbp,
-    refundId: stripeRefund.id,
+  const reasonCategory = REFUND_REASON_CATEGORIES.includes(req.body?.reasonCategory)
+    ? req.body.reasonCategory
+    : "other";
+
+  const refund = await Refund.create({
+    booking: booking._id,
+    payment: record?._id,
+    customer: booking.user,
+    provider: booking.provider,
+    amount,
+    source: "admin",
+    status: "approved",
     reason: String(req.body?.reason || "").trim(),
-    at: new Date(),
-    by: req.user._id,
-  };
-  await booking.save();
+    reasonCategory,
+    decidedBy: req.user._id,
+    decidedAt: new Date(),
+  });
 
-  await recordActivity(
-    req.user._id,
-    "booking.refunded",
-    "Booking",
-    booking._id,
-    `Refunded £${amountGbp.toFixed(2)} for booking ${booking._id}`,
-    { refundId: stripeRefund.id, amount: amountGbp }
-  );
-
-  try {
-    await Notification.create({
-      recipient: booking.user,
-      type: "general",
-      title: "Refund processed",
-      message: `A refund of £${amountGbp.toFixed(
-        2
-      )} has been processed for your booking.`,
-      sentBy: req.user._id,
-      metadata: { bookingId: booking._id },
-    });
-    notifyUser(booking.user.toString(), {
-      title: "Refund processed",
-      body: `A refund of £${amountGbp.toFixed(
-        2
-      )} has been processed for your booking.`,
-      data: { type: "booking_refunded", bookingId: booking._id.toString() },
-    });
-  } catch (e) {
-    /* notifications best effort */
-  }
+  const executed = await executeRefund(refund, req.user._id);
 
   const populated = await Booking.findById(booking._id).populate(
     bookingPopulate
@@ -6098,6 +6325,773 @@ export const refundAdminBooking = catchAsync(async (req, res) => {
     statusCode: httpStatus.OK,
     success: true,
     message: "Refund processed successfully",
-    data: { booking: populated, refund: booking.refund },
+    data: { booking: populated, refund: executed },
+  });
+});
+
+
+// ════════════════════════════════════════════════════════════════
+// Payments & Refunds — unified transactions, refund queue,
+// payout actions aur reconciliation (Payments phase)
+// ════════════════════════════════════════════════════════════════
+
+const TXN_SOURCE_TYPES = ["payment", "payout", "refund"];
+const REFUND_STATUSES = [
+  "requested",
+  "under_review",
+  "approved",
+  "processing",
+  "refunded",
+  "rejected",
+  "failed",
+];
+
+const txnPartyOf = (user) =>
+  user
+    ? { id: user._id, name: user.name || "", email: user.email || "" }
+    : null;
+
+// Payments, payouts aur refunds ko ek hi list ki shakal dena —
+// page teeno ko ek table me dikhata hai.
+export const getAdminTransactions = catchAsync(async (req, res) => {
+  const typeFilter = TXN_SOURCE_TYPES.includes(req.query.type)
+    ? req.query.type
+    : "all";
+  const statusFilter = (req.query.status || "").toString().trim();
+  const search = (req.query.search || "").toString().trim().toLowerCase();
+  const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 100);
+  const dateCond = dateFilter("createdAt", req.query);
+
+  const [payments, payouts, refunds] = await Promise.all([
+    paymentInfo
+      .find({ ...dateCond })
+      .sort({ createdAt: -1 })
+      .limit(600)
+      .populate("userId", "name email")
+      .populate("providerId", "name email")
+      .lean(),
+    Payout.find({ ...dateCond })
+      .sort({ createdAt: -1 })
+      .limit(600)
+      .populate("provider", "name email")
+      .lean(),
+    Refund.find({ ...dateCond })
+      .sort({ createdAt: -1 })
+      .limit(600)
+      .populate("customer", "name email")
+      .populate("provider", "name email")
+      .lean(),
+  ]);
+
+  const rows = [];
+  for (const p of payments) {
+    rows.push({
+      id: p._id,
+      sourceType: "payment",
+      txnNumber: p.txnNumber || "",
+      kind: p.type || "booking",
+      direction: "in",
+      amount: asMoney(p.price),
+      currency: p.currency || "GBP",
+      status:
+        p.paymentStatus === "complete"
+          ? "paid"
+          : p.paymentStatus === "pending"
+            ? "pending"
+            : "failed",
+      rawStatus: p.paymentStatus,
+      method:
+        p.walletAmount > 0 && p.cardAmount > 0
+          ? "Wallet + Card"
+          : p.walletAmount > 0
+            ? "Wallet"
+            : p.paymentMethod || "card",
+      customer: txnPartyOf(p.userId),
+      provider: txnPartyOf(p.providerId),
+      bookingId: p.bookingId || null,
+      failureReason: "",
+      createdAt: p.createdAt,
+    });
+  }
+  for (const p of payouts) {
+    rows.push({
+      id: p._id,
+      sourceType: "payout",
+      txnNumber: p.txnNumber || "",
+      kind: p.source || "booking",
+      direction: "out",
+      amount: asMoney(p.amount),
+      currency: p.currency || "GBP",
+      status: p.status,
+      rawStatus: p.status,
+      method: p.mode === "auto" ? "Stripe (automatic)" : "Bank transfer (manual)",
+      customer: null,
+      provider: txnPartyOf(p.provider),
+      bookingId: null,
+      failureReason: p.failureReason || "",
+      createdAt: p.createdAt,
+    });
+  }
+  for (const r of refunds) {
+    rows.push({
+      id: r._id,
+      sourceType: "refund",
+      txnNumber: r.txnNumber || "",
+      kind: "refund",
+      direction: "out",
+      amount: asMoney(r.amount),
+      currency: "GBP",
+      status: r.status,
+      rawStatus: r.status,
+      method:
+        r.walletPortion > 0 && r.cardPortion > 0
+          ? "Wallet + Card"
+          : r.walletPortion > 0
+            ? "Wallet"
+            : "Card",
+      customer: txnPartyOf(r.customer),
+      provider: txnPartyOf(r.provider),
+      bookingId: r.booking || null,
+      failureReason: "",
+      createdAt: r.createdAt,
+    });
+  }
+
+  const filtered = rows.filter((row) => {
+    if (statusFilter && row.status !== statusFilter) return false;
+    if (search) {
+      const haystack = [
+        row.txnNumber,
+        row.customer?.name,
+        row.customer?.email,
+        row.provider?.name,
+        row.provider?.email,
+        row.bookingId?.toString(),
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      if (!haystack.includes(search)) return false;
+    }
+    return true;
+  });
+
+  const counts = {
+    all: filtered.length,
+    payment: filtered.filter((r) => r.sourceType === "payment").length,
+    payout: filtered.filter((r) => r.sourceType === "payout").length,
+    refund: filtered.filter((r) => r.sourceType === "refund").length,
+    failed: filtered.filter((r) => r.status === "failed").length,
+  };
+
+  const summary = {
+    totalPayments: asMoney(
+      rows
+        .filter((r) => r.sourceType === "payment" && r.status === "paid")
+        .reduce((sum, r) => sum + r.amount, 0)
+    ),
+    pendingPayouts: asMoney(
+      rows
+        .filter(
+          (r) =>
+            r.sourceType === "payout" &&
+            ["pending", "processing"].includes(r.status)
+        )
+        .reduce((sum, r) => sum + r.amount, 0)
+    ),
+    refundRequestsAmount: asMoney(
+      rows
+        .filter(
+          (r) =>
+            r.sourceType === "refund" &&
+            ["requested", "under_review", "approved", "processing"].includes(r.status)
+        )
+        .reduce((sum, r) => sum + r.amount, 0)
+    ),
+    refundRequestsCount: rows.filter(
+      (r) =>
+        r.sourceType === "refund" &&
+        ["requested", "under_review", "approved", "processing"].includes(r.status)
+    ).length,
+    failedAmount: asMoney(
+      rows
+        .filter((r) => r.status === "failed")
+        .reduce((sum, r) => sum + r.amount, 0)
+    ),
+  };
+
+  const typed =
+    typeFilter === "all"
+      ? filtered
+      : filtered.filter((r) => r.sourceType === typeFilter);
+  typed.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  const total = typed.length;
+  const pageRows = typed.slice((page - 1) * limit, page * limit);
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Transactions fetched",
+    data: {
+      transactions: pageRows,
+      counts,
+      summary,
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit),
+    },
+  });
+});
+
+export const getAdminTransactionDetail = catchAsync(async (req, res) => {
+  const { sourceType, id } = req.params;
+  if (!TXN_SOURCE_TYPES.includes(sourceType)) {
+    throw new AppError(httpStatus.BAD_REQUEST, "Invalid transaction type");
+  }
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    throw new AppError(httpStatus.BAD_REQUEST, "Invalid transaction id");
+  }
+
+  let record = null;
+  let booking = null;
+  let bookings = [];
+  let payment = null;
+
+  if (sourceType === "payment") {
+    record = await paymentInfo
+      .findById(id)
+      .populate("userId", "name email phoneNumber")
+      .populate("providerId", "name email phoneNumber")
+      .lean();
+    if (record?.bookingId) {
+      booking = await Booking.findById(record.bookingId)
+        .populate("user", "name email phoneNumber")
+        .populate("provider", "name email phoneNumber")
+        .populate("service", "title price")
+        .lean();
+    }
+  } else if (sourceType === "payout") {
+    record = await Payout.findById(id)
+      .populate("provider", "name email phoneNumber bankDetails stripeConnect payoutMode")
+      .lean();
+    if (record?.bookingIds?.length) {
+      bookings = await Booking.find({ _id: { $in: record.bookingIds } })
+        .select("finalPrice price status completedAt service")
+        .populate("service", "title")
+        .lean();
+    }
+  } else {
+    record = await Refund.findById(id)
+      .populate("customer", "name email phoneNumber")
+      .populate("provider", "name email phoneNumber")
+      .lean();
+    if (record?.booking) {
+      booking = await Booking.findById(record.booking)
+        .populate("user", "name email phoneNumber")
+        .populate("provider", "name email phoneNumber")
+        .populate("service", "title price")
+        .lean();
+    }
+    if (record?.payment) {
+      payment = await paymentInfo.findById(record.payment).lean();
+    }
+    if (record?.ticket) {
+      record.ticketDoc = await SupportTicket.findById(record.ticket)
+        .select("ticketNumber type status subject")
+        .lean();
+    }
+  }
+
+  if (!record) {
+    throw new AppError(httpStatus.NOT_FOUND, "Transaction not found");
+  }
+
+  const notes = await TransactionNote.find({ sourceType, sourceId: id })
+    .sort({ createdAt: -1 })
+    .populate("author", "name email")
+    .lean();
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Transaction detail fetched",
+    data: { record, booking, bookings, payment, notes },
+  });
+});
+
+export const createAdminTransactionNote = catchAsync(async (req, res) => {
+  const { sourceType, sourceId, text, visibility = "internal" } = req.body || {};
+  if (!TXN_SOURCE_TYPES.includes(sourceType)) {
+    throw new AppError(httpStatus.BAD_REQUEST, "Invalid transaction type");
+  }
+  if (!mongoose.Types.ObjectId.isValid(sourceId)) {
+    throw new AppError(httpStatus.BAD_REQUEST, "Invalid transaction id");
+  }
+  const cleanText = (text || "").toString().trim();
+  if (!cleanText) {
+    throw new AppError(httpStatus.BAD_REQUEST, "Note text is required");
+  }
+  if (!["internal", "customer"].includes(visibility)) {
+    throw new AppError(httpStatus.BAD_REQUEST, "Invalid note visibility");
+  }
+  const note = await TransactionNote.create({
+    sourceType,
+    sourceId,
+    author: req.user._id,
+    visibility,
+    text: cleanText.slice(0, 2000),
+  });
+  const data = await TransactionNote.findById(note._id)
+    .populate("author", "name email")
+    .lean();
+  sendResponse(res, {
+    statusCode: httpStatus.CREATED,
+    success: true,
+    message: "Note added",
+    data,
+  });
+});
+
+export const getAdminTransactionNotes = catchAsync(async (req, res) => {
+  const { sourceType, id } = req.params;
+  if (!TXN_SOURCE_TYPES.includes(sourceType)) {
+    throw new AppError(httpStatus.BAD_REQUEST, "Invalid transaction type");
+  }
+  const notes = await TransactionNote.find({ sourceType, sourceId: id })
+    .sort({ createdAt: -1 })
+    .populate("author", "name email")
+    .lean();
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Notes fetched",
+    data: notes,
+  });
+});
+
+// ── Refund queue ────────────────────────────────────────────────
+export const getAdminRefunds = catchAsync(async (req, res) => {
+  const filter = {};
+  if (REFUND_STATUSES.includes(req.query.status)) {
+    filter.status = req.query.status;
+  }
+  Object.assign(filter, dateFilter("createdAt", req.query));
+  const search = (req.query.search || "").toString().trim();
+  if (search) {
+    const users = await User.find({
+      $or: [
+        { name: { $regex: search, $options: "i" } },
+        { email: { $regex: search, $options: "i" } },
+      ],
+    })
+      .select("_id")
+      .lean();
+    const userIds = users.map((u) => u._id);
+    filter.$or = [
+      { reason: { $regex: search, $options: "i" } },
+      { customer: { $in: userIds } },
+      { provider: { $in: userIds } },
+    ];
+  }
+  const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 100);
+
+  const [total, refunds, countsAgg] = await Promise.all([
+    Refund.countDocuments(filter),
+    Refund.find(filter)
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .populate("customer", "name email")
+      .populate("provider", "name email")
+      .populate({
+        path: "booking",
+        select: "finalPrice service",
+        populate: { path: "service", select: "title" },
+      })
+      .lean(),
+    Refund.aggregate([
+      { $match: dateFilter("createdAt", req.query) },
+      {
+        $group: {
+          _id: "$status",
+          count: { $sum: 1 },
+          amount: { $sum: "$amount" },
+        },
+      },
+    ]),
+  ]);
+
+  const counts = {};
+  for (const row of countsAgg) {
+    counts[row._id] = { count: row.count, amount: asMoney(row.amount) };
+  }
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Refunds fetched",
+    data: {
+      refunds,
+      counts,
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit),
+    },
+  });
+});
+
+export const decideAdminRefund = catchAsync(async (req, res) => {
+  const refund = await Refund.findById(req.params.id);
+  if (!refund) {
+    throw new AppError(httpStatus.NOT_FOUND, "Refund not found");
+  }
+  const { decision, amount, note } = req.body || {};
+  if (!["requested", "under_review"].includes(refund.status)) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      `This refund is already ${refund.status}.`
+    );
+  }
+
+  const addNote = async (text, visibility = "internal") => {
+    if (text && text.toString().trim()) {
+      await TransactionNote.create({
+        sourceType: "refund",
+        sourceId: refund._id,
+        author: req.user._id,
+        visibility,
+        text: text.toString().trim().slice(0, 2000),
+      });
+    }
+  };
+
+  if (decision === "reject") {
+    refund.status = "rejected";
+    refund.decidedBy = req.user._id;
+    refund.decidedAt = new Date();
+    await refund.save();
+    await addNote(note);
+    await recordActivity({
+      req,
+      action: "refund.rejected",
+      entityType: "refund",
+      entityId: refund._id,
+      metadata: { amount: refund.amount },
+    });
+    try {
+      notifyUser(refund.customer.toString(), {
+        title: "Refund request update",
+        body: "Your refund request was reviewed and could not be approved. Please contact support if you need help.",
+        data: { type: "refund_rejected", refundId: refund._id.toString() },
+      });
+    } catch (e) {
+      /* best effort */
+    }
+    return sendResponse(res, {
+      statusCode: httpStatus.OK,
+      success: true,
+      message: "Refund rejected",
+      data: refund,
+    });
+  }
+
+  if (decision === "more_info") {
+    refund.status = "under_review";
+    await refund.save();
+    await addNote(note);
+    return sendResponse(res, {
+      statusCode: httpStatus.OK,
+      success: true,
+      message: "Refund marked as under review",
+      data: refund,
+    });
+  }
+
+  if (decision === "approve") {
+    if (amount !== undefined && amount !== null) {
+      const cleanAmount = asMoney(amount);
+      if (!cleanAmount || cleanAmount <= 0) {
+        throw new AppError(httpStatus.BAD_REQUEST, "Invalid refund amount");
+      }
+      refund.amount = cleanAmount;
+    }
+    refund.status = "approved";
+    refund.decidedBy = req.user._id;
+    refund.decidedAt = new Date();
+    await refund.save();
+    await addNote(note);
+    const executed = await executeRefund(refund, req.user._id);
+    await recordActivity({
+      req,
+      action: "refund.approved",
+      entityType: "refund",
+      entityId: refund._id,
+      metadata: { amount: refund.amount },
+    });
+    return sendResponse(res, {
+      statusCode: httpStatus.OK,
+      success: true,
+      message: "Refund approved and processed",
+      data: executed,
+    });
+  }
+
+  throw new AppError(httpStatus.BAD_REQUEST, "Invalid decision");
+});
+
+// Approved par atka hua refund dobara execute karna (masalan Stripe
+// fail ke baad).
+export const processAdminRefund = catchAsync(async (req, res) => {
+  const refund = await Refund.findById(req.params.id);
+  if (!refund) {
+    throw new AppError(httpStatus.NOT_FOUND, "Refund not found");
+  }
+  if (refund.status !== "approved") {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      `Only an approved refund can be processed (this one is ${refund.status}).`
+    );
+  }
+  const executed = await executeRefund(refund, req.user._id);
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Refund processed",
+    data: executed,
+  });
+});
+
+// ── Payout actions ──────────────────────────────────────────────
+export const retryAdminPayout = catchAsync(async (req, res) => {
+  const payout = await Payout.findById(req.params.id);
+  if (!payout) {
+    throw new AppError(httpStatus.NOT_FOUND, "Payout not found");
+  }
+  if (!["failed", "pending"].includes(payout.status)) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      `A ${payout.status} payout cannot be retried.`
+    );
+  }
+  if (payout.status === "failed") {
+    payout.status = "pending";
+    payout.failureReason = "";
+    payout.attempts.push({
+      action: "admin_retry",
+      result: "pending",
+      note: "Admin retried the automatic payout.",
+      by: req.user._id,
+    });
+    await payout.save();
+  }
+  const attempt = await attemptPayoutTransfer(payout);
+  await recordActivity({
+    req,
+    action: "payout.retried",
+    entityType: "payout",
+    entityId: payout._id,
+    metadata: { attempted: attempt.attempted, status: attempt.payout.status },
+  });
+  broadcast("admin_payout_updated", {
+    payoutId: payout._id,
+    status: attempt.payout.status,
+  });
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: attempt.attempted
+      ? "Automatic payout attempted"
+      : "Payout is queued — automatic transfer is not available for this provider yet",
+    data: attempt.payout,
+  });
+});
+
+export const payAdminPayoutManually = catchAsync(async (req, res) => {
+  const payout = await Payout.findById(req.params.id);
+  if (!payout) {
+    throw new AppError(httpStatus.NOT_FOUND, "Payout not found");
+  }
+  const { reference = "", note = "" } = req.body || {};
+  if (payout.status === "processing" && payout.mode === "auto") {
+    throw new AppError(
+      httpStatus.CONFLICT,
+      "This payout is being processed by Stripe — paying it manually now could pay the provider twice. Wait for the Stripe result first."
+    );
+  }
+  if (!["pending", "failed"].includes(payout.status)) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      `A ${payout.status} payout cannot be paid manually.`
+    );
+  }
+  payout.mode = "manual";
+  payout.stripeMode = "manual";
+  payout.status = "paid";
+  payout.paidAt = new Date();
+  payout.failureReason = "";
+  payout.updatedBy = req.user._id;
+  if (reference.toString().trim()) {
+    payout.manualAdjustmentReason = `Manual bank transfer — ref: ${reference.toString().trim()}`;
+  } else if (note.toString().trim()) {
+    payout.manualAdjustmentReason = note.toString().trim();
+  }
+  payout.attempts.push({
+    action: "manual_paid",
+    result: "paid",
+    note: [reference, note]
+      .map((v) => v?.toString?.().trim())
+      .filter(Boolean)
+      .join(" — "),
+    by: req.user._id,
+  });
+  await payout.save();
+
+  await recordActivity({
+    req,
+    action: "payout.paid_manually",
+    entityType: "payout",
+    entityId: payout._id,
+    metadata: { amount: payout.amount, reference: reference || "" },
+  });
+  broadcast("admin_payout_updated", { payoutId: payout._id, status: payout.status });
+  if (payout.provider) {
+    notifyUser(payout.provider.toString(), {
+      title: "Payout sent! 💸",
+      body: `Your payout of £${payout.amount} has been sent.`,
+      data: {
+        type: "payout_update",
+        payoutId: payout._id.toString(),
+        status: "paid",
+      },
+    });
+  }
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Payout marked as paid",
+    data: payout,
+  });
+});
+
+// ── Reconciliation ──────────────────────────────────────────────
+// Ledger aur Stripe ke darmiyan farq dhoondna: bahar se hue
+// refunds, atke hue payouts, paid payment par unpaid booking.
+export const getAdminReconciliation = catchAsync(async (req, res) => {
+  const issues = {
+    stripeRefundsNotRecorded: [],
+    stuckPayouts: [],
+    paidPaymentsBookingNotPaid: [],
+    stuckRefunds: [],
+  };
+  let stripeError = "";
+
+  try {
+    const stripeRefunds = await getStripe().refunds.list({ limit: 100 });
+    for (const sr of stripeRefunds.data) {
+      if (sr.status !== "succeeded") continue;
+      const known = await Refund.exists({ stripeRefundId: sr.id });
+      if (known) continue;
+      const rec = sr.payment_intent
+        ? await paymentInfo
+            .findOne({ transactionId: sr.payment_intent })
+            .select("_id bookingId")
+            .lean()
+        : null;
+      issues.stripeRefundsNotRecorded.push({
+        stripeRefundId: sr.id,
+        amount: asMoney(sr.amount / 100),
+        paymentIntentId: sr.payment_intent || "",
+        bookingId: rec?.bookingId || null,
+        at: new Date((sr.created || 0) * 1000),
+      });
+    }
+  } catch (e) {
+    stripeError = "Stripe could not be reached for the refund check.";
+  }
+
+  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 3600 * 1000);
+  const oneDayAgo = new Date(Date.now() - 24 * 3600 * 1000);
+  const oneHourAgo = new Date(Date.now() - 3600 * 1000);
+
+  const [stuckPayouts, stuckRefunds, recentPaid] = await Promise.all([
+    Payout.find({ status: "processing", updatedAt: { $lt: sevenDaysAgo } })
+      .select("provider amount txnNumber createdAt updatedAt")
+      .populate("provider", "name email")
+      .limit(20)
+      .lean(),
+    Refund.find({
+      status: { $in: ["approved", "processing"] },
+      updatedAt: { $lt: oneDayAgo },
+    })
+      .select("booking amount status txnNumber createdAt updatedAt")
+      .limit(20)
+      .lean(),
+    paymentInfo
+      .find({
+        paymentStatus: "complete",
+        type: "booking",
+        createdAt: { $lt: oneHourAgo },
+      })
+      .select("bookingId price transactionId createdAt")
+      .sort({ createdAt: -1 })
+      .limit(100)
+      .lean(),
+  ]);
+  issues.stuckPayouts = stuckPayouts;
+  issues.stuckRefunds = stuckRefunds;
+
+  if (recentPaid.length) {
+    const bookingIds = recentPaid.map((p) => p.bookingId).filter(Boolean);
+    const bookings = await Booking.find({ _id: { $in: bookingIds } })
+      .select("payment.status")
+      .lean();
+    const paidSet = new Set(
+      bookings
+        .filter((b) => b.payment?.status === "paid")
+        .map((b) => b._id.toString())
+    );
+    issues.paidPaymentsBookingNotPaid = recentPaid
+      .filter((p) => p.bookingId && !paidSet.has(p.bookingId.toString()))
+      .slice(0, 20);
+  }
+
+  let stripeBalance = null;
+  try {
+    const bal = await getStripe().balance.retrieve();
+    stripeBalance = {
+      available: (bal.available || []).map((b) => ({
+        currency: b.currency.toUpperCase(),
+        amount: asMoney(b.amount / 100),
+      })),
+      pending: (bal.pending || []).map((b) => ({
+        currency: b.currency.toUpperCase(),
+        amount: asMoney(b.amount / 100),
+      })),
+    };
+  } catch (e) {
+    /* balance optional hai */
+  }
+
+  const counts = {
+    stripeRefundsNotRecorded: issues.stripeRefundsNotRecorded.length,
+    stuckPayouts: issues.stuckPayouts.length,
+    paidPaymentsBookingNotPaid: issues.paidPaymentsBookingNotPaid.length,
+    stuckRefunds: issues.stuckRefunds.length,
+  };
+  counts.total =
+    counts.stripeRefundsNotRecorded +
+    counts.stuckPayouts +
+    counts.paidPaymentsBookingNotPaid +
+    counts.stuckRefunds;
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Reconciliation fetched",
+    data: { issues, counts, stripeBalance, stripeError, checkedAt: new Date() },
   });
 });

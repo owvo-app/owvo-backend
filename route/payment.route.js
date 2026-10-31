@@ -3,6 +3,11 @@ import {
   createPayment,
   confirmPayment,
   stripeWebhook,
+  getMyWallet,
+  getMyWalletTransactions,
+  createWalletTopup,
+  createRefundRequest,
+  getMyRefundRequests,
 } from "../controller/payment.controller.js";
 import { protect } from "../middleware/auth.middleware.js";
 
@@ -16,5 +21,14 @@ router.post("/create-payment", protect, createPayment);
 
 // Capture Payment
 router.post("/confirm-payment", protect, confirmPayment);
+
+// Customer wallet (Payments phase)
+router.get("/wallet", protect, getMyWallet);
+router.get("/wallet/transactions", protect, getMyWalletTransactions);
+router.post("/wallet/topup", protect, createWalletTopup);
+
+// Customer refund requests
+router.post("/refund-request", protect, createRefundRequest);
+router.get("/my-refunds", protect, getMyRefundRequests);
 
 export default router;

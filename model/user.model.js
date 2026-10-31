@@ -274,6 +274,14 @@ const userSchema = new Schema(
       onboardingComplete: { type: Boolean, default: false },
     },
 
+    // Payout ka tarika: "auto" = Stripe Connect automatic jahan
+    // mumkin ho; "manual" = sirf admin ke bank transfer se.
+    payoutMode: {
+      type: String,
+      enum: ["auto", "manual"],
+      default: "auto",
+    },
+
     isBankCompleted: { type: Boolean, default: false },
 
    insurance: {

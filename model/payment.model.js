@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { getNextTxnNumber } from "../utils/counter.util.js";
 
 const paymentInfoSchema = new mongoose.Schema(
   {
@@ -31,6 +32,10 @@ const paymentInfoSchema = new mongoose.Schema(
       enum: ["success", "failed","pending"],
       default: "pending",
     },
+    txnNumber: { type: String, unique: true, sparse: true, index: true },
+    // Wallet/Card split — cardAmount woh hissa hai jo Stripe se gaya.
+    walletAmount: { type: Number, default: 0 },
+    cardAmount: { type: Number, default: 0 },
     seasonId: { type: String },
     transactionId: { type: String },
     paymentMethodNonce: { type: String },
@@ -41,5 +46,11 @@ const paymentInfoSchema = new mongoose.Schema(
     timestamps: true,
   }
 );
+
+paymentInfoSchema.pre("save", async function assignTxnNumber() {
+  if (!this.txnNumber) {
+    this.txnNumber = await getNextTxnNumber();
+  }
+});
 
 export const paymentInfo = mongoose.model("paymentInfo", paymentInfoSchema);

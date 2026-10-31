@@ -2,6 +2,14 @@ import httpStatus from "http-status";
 import mongoose from "mongoose";
 import AppError from "../errors/AppError.js";
 import { Booking } from "../model/booking.model.js";
+import {
+  applyCommissionSnapshot,
+  bookingNetAmount,
+  computeProviderBalances,
+  getUnpaidBookingEarnings,
+} from "../utils/money.util.js";
+import { attemptPayoutTransfer } from "../utils/payout.util.js";
+import Stripe from "stripe";
 import { paymentInfo } from "../model/payment.model.js";
 import { Rating } from "../model/rating.model.js";
 import { Service } from "../model/service.model.js";
@@ -759,10 +767,12 @@ export const requestCashOut = catchAsync(async (req, res) => {
     throw new AppError(httpStatus.FORBIDDEN, "Only providers can cash out");
   }
 
-  // Check for existing pending/processing payout
+  // Pehle se ek booking payout chal raha ho to dusra nahi banta
+  // (bonus payouts is check se bahar hain — un ka hisaab alag hai).
   const existingPending = await Payout.findOne({
     provider: providerId,
     status: { $in: ["pending", "processing"] },
+    source: { $ne: "bonus" },
   });
 
   if (existingPending) {
@@ -772,66 +782,45 @@ export const requestCashOut = catchAsync(async (req, res) => {
     );
   }
 
-  // Calculate available balance (same logic as getWalletSummary)
-  const settings = await getPlatformSettingsDoc();
-  const commissionRate = Number(settings.commissionRate) || 0.25;
+  // Unified hisaab (snapshot + tips − refunds − dispute holds −
+  // pehle ke payouts) — money.util se, admin ke hisaab jaisa hi.
+  const balances = await computeProviderBalances(providerId);
 
-  const completedFilter = { provider: providerId, status: "completed" };
-
-  const [lifetimeAgg, tipsAgg, paidOutAgg, pendingPayoutsAgg] =
-    await Promise.all([
-      Booking.aggregate([
-        { $match: completedFilter },
-        { $group: { _id: null, total: { $sum: "$finalPrice" } } },
-      ]),
-      paymentInfo.aggregate([
-        {
-          $match: {
-            providerId: new mongoose.Types.ObjectId(providerId),
-            type: "tips",
-            paymentStatus: "complete",
-          },
-        },
-        { $group: { _id: null, total: { $sum: "$price" } } },
-      ]),
-      Payout.aggregate([
-        { $match: { provider: providerId, status: "paid" } },
-        { $group: { _id: null, total: { $sum: "$amount" } } },
-      ]),
-      Payout.aggregate([
-        {
-          $match: {
-            provider: providerId,
-            status: { $in: ["pending", "processing"] },
-          },
-        },
-        { $group: { _id: null, total: { $sum: "$amount" } } },
-      ]),
-    ]);
-
-  const lifetimeGross = lifetimeAgg[0]?.total || 0;
-  const totalTips = tipsAgg[0]?.total || 0;
-  const totalPaidOut = paidOutAgg[0]?.total || 0;
-  const pendingBalance = pendingPayoutsAgg[0]?.total || 0;
-
-  const lifetimeNet = netProviderShare(lifetimeGross, commissionRate) + totalTips;
-  const availableBalance = Math.max(0, lifetimeNet - totalPaidOut - pendingBalance);
-
-  if (availableBalance <= 0) {
+  if (balances.available <= 0) {
     throw new AppError(
       httpStatus.BAD_REQUEST,
       "No available balance to cash out"
     );
   }
 
-  // Create payout request
-  const payout = await Payout.create({
+  // Kaun si bookings ki earning is payout me ja rahi hai — record
+  // ke liye (refund reversal ka faisla isi se hota hai). Dispute
+  // par ruki (held) bookings is me shamil nahi hotin.
+  const unpaidRows = await getUnpaidBookingEarnings(providerId);
+
+  let payout = await Payout.create({
     provider: providerId,
-    amount: Math.round(availableBalance * 100) / 100,
+    amount: balances.available,
     currency: "GBP",
     status: "pending",
     payoutDate: new Date(),
+    source: "booking",
+    bookingIds: unpaidRows
+      .filter((row) => !row.held)
+      .map((row) => row.bookingId),
+    attempts: [
+      {
+        action: "cashout_requested",
+        result: "pending",
+        note: "Provider requested cash out from the app.",
+      },
+    ],
   });
+
+  // Automatic mumkin ho (Connect tayyar + settings on) to isi waqt
+  // transfer ki koshish; warna payout admin ki queue me rahe ga.
+  const attempt = await attemptPayoutTransfer(payout);
+  payout = attempt.payout;
 
   recordActivity({
     req,
@@ -853,6 +842,7 @@ export const requestCashOut = catchAsync(async (req, res) => {
       payoutId: payout._id,
       amount: payout.amount,
       status: payout.status,
+      mode: payout.mode,
     },
   });
 });
@@ -932,6 +922,8 @@ export const completeWash = catchAsync(async (req, res) => {
   }
 
   booking.status = "completed";
+  // Commission snapshot — complete hone ke lamhe ka rate pakka.
+  await applyCommissionSnapshot(booking);
   await booking.save();
 
   const washer = await User.findById(req.user._id);
@@ -1917,6 +1909,11 @@ const getPlatformSettingsDoc = async () =>
  * nikalta hai. Sab wallet endpoints yehi ek jagah se rate leti hain —
  * admin jab chahe Settings se rate badle, sab khud update ho jata hai.
  */
+const getStripe = () =>
+  new Stripe(process.env.STRIPE_SECRET_KEY, {
+    apiVersion: process.env.STRIPE_API_VERSION || "2025-11-17.clover",
+  });
+
 const netProviderShare = (grossAmount, commissionRate) =>
   asMoney(grossAmount * (1 - commissionRate));
 
@@ -1932,95 +1929,58 @@ export const getWalletSummary = catchAsync(async (req, res) => {
   const accountNumber = provider?.bankDetails?.accountNumber || "";
   const bankLast4 = accountNumber.length >= 4 ? accountNumber.slice(-4) : "";
   const bankName = provider?.bankDetails?.bankName || "";
-  const settings = await getPlatformSettingsDoc();
-  const commissionRate = Number(settings.commissionRate) || 0.25;
 
+  // Saara lifetime hisaab ab ek hi jagah se (money.util) — commission
+  // snapshot par, tips shamil, refund reversals aur dispute holds
+  // ghata kar. Admin page aur dashboard bhi yahi hisaab parhte hain.
+  const balances = await computeProviderBalances(providerId);
+
+  // Is hafte / aaj ki earnings — snapshot-aware per-booking nets.
   const now = new Date();
   const todayStart = new Date(now);
   todayStart.setUTCHours(0, 0, 0, 0);
-
   const currentDay = now.getUTCDay();
   const weekStart = new Date(now);
   weekStart.setUTCDate(now.getUTCDate() - (currentDay === 0 ? 6 : currentDay - 1));
   weekStart.setUTCHours(0, 0, 0, 0);
 
-  const completedFilter = { provider: providerId, status: "completed" };
-
-  const [lifetimeAgg, weekAgg, todayAgg, jobsCompleted, tipsAgg, paidOutAgg] =
-    await Promise.all([
-      Booking.aggregate([
-        { $match: completedFilter },
-        { $group: { _id: null, total: { $sum: "$finalPrice" } } },
-      ]),
-      Booking.aggregate([
-        { $match: { ...completedFilter, completedAt: { $gte: weekStart } } },
-        { $group: { _id: null, total: { $sum: "$finalPrice" } } },
-      ]),
-      Booking.aggregate([
-        { $match: { ...completedFilter, completedAt: { $gte: todayStart } } },
-        { $group: { _id: null, total: { $sum: "$finalPrice" } } },
-      ]),
-      Booking.countDocuments(completedFilter),
-      paymentInfo.aggregate([
-        {
-          $match: {
-            providerId: new mongoose.Types.ObjectId(providerId),
-            type: "tips",
-            paymentStatus: "complete",
-          },
-        },
-        { $group: { _id: null, total: { $sum: "$price" } } },
-      ]),
-      Payout.aggregate([
-        { $match: { provider: providerId, status: "paid" } },
-        { $group: { _id: null, total: { $sum: "$amount" } } },
-      ]),
-    ]);
-
-  const lifetimeGross = lifetimeAgg[0]?.total || 0;
-  const weekGross = weekAgg[0]?.total || 0;
-  const todayGross = todayAgg[0]?.total || 0;
-  const totalTips = asMoney(tipsAgg[0]?.total || 0);
-  const totalPaidOut = asMoney(paidOutAgg[0]?.total || 0);
-
-  const lifetimeNet = asMoney(
-    netProviderShare(lifetimeGross, commissionRate) + totalTips
-  );
-  const weekNet = asMoney(netProviderShare(weekGross, commissionRate));
-  const todayNet = asMoney(netProviderShare(todayGross, commissionRate));
-
-  // Pending = payouts jo ban chuke hain lekin abhi provider ke bank tak
-  // nahi pahunche (queue mein hain). Available = kamaya hua paisa jo
-  // abhi tak kisi payout mein shamil nahi hua.
-  const pendingPayoutsAgg = await Payout.aggregate([
-    {
-      $match: {
-        provider: providerId,
-        status: { $in: ["pending", "processing"] },
-      },
-    },
-    { $group: { _id: null, total: { $sum: "$amount" } } },
+  const periodNet = async (from) => {
+    const rows = await Booking.find({
+      provider: providerId,
+      status: "completed",
+      completedAt: { $gte: from },
+    })
+      .select("finalPrice price providerNetAmount")
+      .lean();
+    return asMoney(
+      rows.reduce(
+        (sum, booking) => sum + bookingNetAmount(booking, balances.commissionRate),
+        0
+      )
+    );
+  };
+  const [weekNet, todayNet] = await Promise.all([
+    periodNet(weekStart),
+    periodNet(todayStart),
   ]);
-  const pendingBalance = asMoney(pendingPayoutsAgg[0]?.total || 0);
-  const availableBalance = asMoney(
-    Math.max(0, lifetimeNet - totalPaidOut - pendingBalance)
-  );
 
   sendResponse(res, {
     statusCode: httpStatus.OK,
     success: true,
     message: "Wallet summary fetched",
     data: {
-      availableBalance,
-      pendingBalance,
-      lifetimeEarnings: lifetimeNet,
+      availableBalance: balances.available,
+      pendingBalance: balances.allocated,
+      lifetimeEarnings: asMoney(balances.net + balances.tips),
       thisWeekEarnings: weekNet,
       todayEarnings: todayNet,
-      totalTips,
-      commissionRate,
-      totalJobsCompleted: jobsCompleted,
-      bankLast4,  // <-- ADD THIS
-      bankName, 
+      totalTips: balances.tips,
+      commissionRate: balances.commissionRate,
+      totalJobsCompleted: balances.jobsCompleted,
+      heldAmount: balances.heldAmount,
+      totalPaidOut: balances.paidOut,
+      bankLast4,
+      bankName,
     },
   });
 });
@@ -2119,8 +2079,16 @@ export const getWalletEarnings = catchAsync(async (req, res) => {
 
   const rows = bookings.map((booking) => {
     const gross = booking.finalPrice || 0;
-    const commissionAmount = asMoney(gross * commissionRate);
-    const providerEarning = asMoney(gross - commissionAmount);
+    // Snapshot ho to wohi hisaab jo booking complete hone par laga tha.
+    const hasSnapshot =
+      booking.providerNetAmount !== null &&
+      booking.providerNetAmount !== undefined;
+    const commissionAmount = hasSnapshot
+      ? asMoney(booking.commissionAmount)
+      : asMoney(gross * commissionRate);
+    const providerEarning = hasSnapshot
+      ? asMoney(booking.providerNetAmount)
+      : asMoney(gross - commissionAmount);
     const tip = asMoney(tipByBooking.get(String(booking._id)) || 0);
 
     return {
@@ -2203,8 +2171,15 @@ export const emailWalletStatement = catchAsync(async (req, res) => {
   const rowsHtml = bookings
     .map((booking) => {
       const gross = booking.finalPrice || 0;
-      const commission = asMoney(gross * commissionRate);
-      const net = asMoney(gross - commission);
+      const hasSnapshot =
+        booking.providerNetAmount !== null &&
+        booking.providerNetAmount !== undefined;
+      const commission = hasSnapshot
+        ? asMoney(booking.commissionAmount)
+        : asMoney(gross * commissionRate);
+      const net = hasSnapshot
+        ? asMoney(booking.providerNetAmount)
+        : asMoney(gross - commission);
       grossTotal += gross;
       netTotal += net;
       const dateLabel = booking.completedAt
@@ -2230,7 +2205,7 @@ export const emailWalletStatement = catchAsync(async (req, res) => {
             <th style="padding:8px;text-align:left;">Date</th>
             <th style="padding:8px;text-align:left;">Service</th>
             <th style="padding:8px;text-align:right;">Price</th>
-            <th style="padding:8px;text-align:right;">OWVO ${Math.round(commissionRate * 100)}%</th>
+            <th style="padding:8px;text-align:right;">OWVO Commission</th>
             <th style="padding:8px;text-align:right;">Your Earning</th>
           </tr>
         </thead>
@@ -2251,5 +2226,85 @@ export const emailWalletStatement = catchAsync(async (req, res) => {
     success: true,
     message: "Statement emailed",
     data: { email: provider.email, jobCount: bookings.length },
+  });
+});
+
+/**
+ * GET /washers/connect/status — Stripe Connect (automatic payouts)
+ * ki halat. Account bana ho to Stripe se taza halat bhi sync hoti
+ * hai, taake app dobara khulte hi sahi status dikhe.
+ */
+export const getConnectStatus = catchAsync(async (req, res) => {
+  const provider = await User.findById(req.user._id).select(
+    "stripeConnect payoutMode"
+  );
+  let connect = provider?.stripeConnect || {};
+  if (connect.accountId) {
+    try {
+      const account = await getStripe().accounts.retrieve(connect.accountId);
+      provider.stripeConnect.payoutsEnabled = !!account.payouts_enabled;
+      provider.stripeConnect.onboardingComplete = !!(
+        account.details_submitted && account.payouts_enabled
+      );
+      await provider.save();
+      connect = provider.stripeConnect;
+    } catch (error) {
+      console.error("Connect status sync failed:", error?.message || error);
+    }
+  }
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Connect status fetched",
+    data: {
+      accountId: connect.accountId || "",
+      payoutsEnabled: !!connect.payoutsEnabled,
+      onboardingComplete: !!connect.onboardingComplete,
+      payoutMode: provider?.payoutMode || "auto",
+    },
+  });
+});
+
+/**
+ * POST /washers/connect/onboarding — Stripe ka hosted setup page.
+ * Pehli dafa provider ka Connect account banta hai; link har dafa
+ * naya banta hai (links expire hote hain). Bank aur ID ki tafseel
+ * provider Stripe par deta hai — hum kuch store nahi karte,
+ * verification bhi Stripe ki hoti hai.
+ */
+export const createConnectOnboarding = catchAsync(async (req, res) => {
+  if (req.user?.role !== "provider") {
+    throw new AppError(
+      httpStatus.FORBIDDEN,
+      "Only providers can set up payouts"
+    );
+  }
+  const provider = await User.findById(req.user._id);
+  if (!provider.stripeConnect?.accountId) {
+    const account = await getStripe().accounts.create({
+      type: "express",
+      country: "GB",
+      email: provider.email,
+      business_type: "individual",
+      capabilities: { transfers: { requested: true } },
+    });
+    provider.stripeConnect.accountId = account.id;
+    await provider.save();
+  }
+  const link = await getStripe().accountLinks.create({
+    account: provider.stripeConnect.accountId,
+    refresh_url:
+      process.env.CONNECT_ONBOARDING_REFRESH_URL ||
+      "https://owvo-dashboard.netlify.app/",
+    return_url:
+      process.env.CONNECT_ONBOARDING_RETURN_URL ||
+      "https://owvo-dashboard.netlify.app/",
+    type: "account_onboarding",
+  });
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Onboarding link created",
+    data: { url: link.url, expiresAt: link.expires_at },
   });
 });
