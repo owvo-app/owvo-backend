@@ -2257,6 +2257,7 @@ export const getConnectStatus = catchAsync(async (req, res) => {
     success: true,
     message: "Connect status fetched",
     data: {
+      connected: !!connect.accountId,
       accountId: connect.accountId || "",
       payoutsEnabled: !!connect.payoutsEnabled,
       onboardingComplete: !!connect.onboardingComplete,
