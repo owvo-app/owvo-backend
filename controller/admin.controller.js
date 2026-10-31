@@ -1691,6 +1691,12 @@ export const getAdminProviderDetail = catchAsync(async (req, res) => {
     .sort((x, y) => new Date(y.createdAt) - new Date(x.createdAt))
     .slice(0, 10);
 
+  const completedTodayCount = await Booking.countDocuments({
+    provider: providerId,
+    status: "completed",
+    completedAt: { $gte: todayStart },
+  });
+
   // Step 6 — Earnings/Bookings tabs: payout history + recent completed jobs
   // (per-booking earnings table ke liye).
   const [payoutHistory, recentCompletedJobs] = await Promise.all([
@@ -1756,6 +1762,7 @@ export const getAdminProviderDetail = catchAsync(async (req, res) => {
         createdAt: b.createdAt,
       })),
       recentActivity,
+      dailyLimit: buildProviderDailyWashLimitPayload(provider, settings, completedTodayCount),
       payouts: payoutHistory.map((p) => ({
         _id: p._id,
         amount: p.amount,
