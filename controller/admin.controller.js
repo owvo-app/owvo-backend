@@ -1015,7 +1015,8 @@ export const getAllCustomers = catchAsync(async (req, res) => {
     })
     .lean();
   const customerIds = customers.map((customer) => customer._id).filter(Boolean);
-  const [ratingStats, recentReviews, bookingTotals] = await Promise.all([
+  const [ratingStats, recentReviews, bookingTotals, latestAddresses] =
+    await Promise.all([
     UserRating.aggregate([
       { $match: { user: { $in: customerIds } } },
       {
@@ -1045,7 +1046,17 @@ export const getAllCustomers = catchAsync(async (req, res) => {
         },
       },
     ]),
-  ]);
+    Booking.aggregate([
+      { $match: { user: { $in: customerIds } } },
+      { $sort: { createdAt: -1 } },
+      {
+        $group: {
+          _id: "$user",
+          latestAddress: { $first: "$address.addressLine" },
+        },
+      },
+    ]),
+    ]);
   const ratingsByCustomerId = new Map(
     ratingStats.map((stat) => [
       stat._id.toString(),
@@ -1080,8 +1091,12 @@ export const getAllCustomers = catchAsync(async (req, res) => {
       },
     ])
   );
+  const latestAddressByCustomerId = new Map(
+    latestAddresses.map((row) => [row._id.toString(), row.latestAddress || ""])
+  );
   const data = customers.map((customer) => ({
     ...customer,
+    latestAddress: latestAddressByCustomerId.get(customer._id.toString()) || "",
     ...ratingsByCustomerId.get(customer._id.toString()),
     ...(totalsByCustomerId.get(customer._id.toString()) || {
       totalBookings: 0,
@@ -2225,6 +2240,53 @@ export const getAdminCustomerDetail = catchAsync(async (req, res) => {
       .lean(),
   ]);
 
+  // View on Map ke liye sab se taza location: (1) active booking ki LIVE
+  // location (customer navigate kar raha ho), (2) profile par saved address
+  // location, (3) latest booking ke address ki location.
+  let mapLocation = null;
+  const liveBooking = await Booking.findOne({
+    user: customerId,
+    status: { $in: ["accepted", "arrived", "ongoing"] },
+    "customerLocation.latitude": { $ne: null },
+    "customerLocation.longitude": { $ne: null },
+  })
+    .sort({ createdAt: -1 })
+    .select("customerLocation")
+    .lean();
+  if (
+    liveBooking?.customerLocation?.latitude != null &&
+    liveBooking?.customerLocation?.longitude != null
+  ) {
+    mapLocation = {
+      lat: liveBooking.customerLocation.latitude,
+      lng: liveBooking.customerLocation.longitude,
+      source: "live",
+      updatedAt: liveBooking.customerLocation.updatedAt || null,
+    };
+  } else if (
+    Array.isArray(customer.location?.coordinates) &&
+    customer.location.coordinates.length === 2 &&
+    (customer.location.coordinates[0] !== 0 ||
+      customer.location.coordinates[1] !== 0)
+  ) {
+    mapLocation = {
+      lat: customer.location.coordinates[1],
+      lng: customer.location.coordinates[0],
+      source: "profile",
+      updatedAt: null,
+    };
+  } else if (
+    bookings[0]?.address?.latitude != null &&
+    bookings[0]?.address?.longitude != null
+  ) {
+    mapLocation = {
+      lat: bookings[0].address.latitude,
+      lng: bookings[0].address.longitude,
+      source: "booking",
+      updatedAt: null,
+    };
+  }
+
   const counts = {};
   statusCounts.forEach((row) => {
     counts[row._id] = row.count;
@@ -2237,6 +2299,8 @@ export const getAdminCustomerDetail = catchAsync(async (req, res) => {
     message: "Customer detail fetched successfully",
     data: {
       customer,
+      latestBookingAddress: bookings[0]?.address?.addressLine || "",
+      mapLocation,
       stats: {
         totalBookings,
         counts: {
@@ -2362,6 +2426,10 @@ export const createAdminCustomer = catchAsync(async (req, res) => {
       "Password must be at least 6 characters"
     );
   }
+  const latitude = Number(req.body?.latitude);
+  const longitude = Number(req.body?.longitude);
+  const hasLocation =
+    Number.isFinite(latitude) && Number.isFinite(longitude);
   let dateOfBirth;
   if (dateOfBirthRaw) {
     dateOfBirth = new Date(dateOfBirthRaw);
@@ -2395,6 +2463,9 @@ export const createAdminCustomer = catchAsync(async (req, res) => {
       role: "user",
       residentialAddress,
       ...(dateOfBirth ? { dateOfBirth } : {}),
+      ...(hasLocation
+        ? { location: { type: "Point", coordinates: [longitude, latitude] } }
+        : {}),
       verificationInfo: { verified: true },
     });
   } catch (error) {
@@ -2498,6 +2569,16 @@ export const updateAdminCustomerProfile = catchAsync(async (req, res) => {
   }
   if (req.body?.residentialAddress !== undefined) {
     customer.residentialAddress = String(req.body.residentialAddress).trim();
+  }
+  if (req.body?.latitude !== undefined || req.body?.longitude !== undefined) {
+    const latitude = Number(req.body?.latitude);
+    const longitude = Number(req.body?.longitude);
+    if (Number.isFinite(latitude) && Number.isFinite(longitude)) {
+      customer.location = {
+        type: "Point",
+        coordinates: [longitude, latitude],
+      };
+    }
   }
 
   try {
