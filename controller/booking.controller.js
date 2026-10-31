@@ -283,6 +283,9 @@ export const createBooking = catchAsync(async (req, res) => {
       status: "pending",
     },
     status: "pending",
+    statusHistory: [
+      { status: "pending", at: new Date(), by: "user", note: "Booking requested" },
+    ],
   });
 
   // ✅ Real-time: notify the washer about the new incoming booking request
@@ -508,6 +511,14 @@ export const updateBookingStatus = catchAsync(async (req, res) => {
     booking.arrivedAt = new Date();
     booking.washEndsAt = new Date(booking.arrivedAt.getTime() + 30 * 60 * 1000);
   }
+  booking.statusHistory = [
+    ...(booking.statusHistory || []),
+    {
+      status,
+      at: new Date(),
+      by: isProvider ? "provider" : isOwner ? "user" : "admin",
+    },
+  ];
   await booking.save();
   await refreshProviderBusyState(booking.provider);
 
@@ -812,6 +823,20 @@ export const cancelBooking = catchAsync(async (req, res) => {
   }
 
   booking.status = "cancelled";
+  booking.cancelledBy = "user";
+  booking.cancelledAt = new Date();
+  if (typeof req.body?.reason === "string" && req.body.reason.trim()) {
+    booking.cancellationReason = req.body.reason.trim();
+  }
+  booking.statusHistory = [
+    ...(booking.statusHistory || []),
+    {
+      status: "cancelled",
+      at: new Date(),
+      by: "user",
+      note: booking.cancellationReason || "",
+    },
+  ];
   await booking.save();
   await refreshProviderBusyState(booking.provider);
 

@@ -55,6 +55,52 @@ const BOOKING_STATUSES = [
 ];
 const STAFF_BOOKING_STATUSES = ["accepted", "arrived", "ongoing", "completed", "cancelled"];
 
+// Bookings redesign Step 1: admin status transitions sirf in raaston se ho
+// sakti hain - baqi sab 400. Har tabdeeli statusHistory me bhi likhi jati hai.
+const BOOKING_TRANSITIONS = {
+  pending: ["accepted", "cancelled"],
+  accepted: ["arrived", "cancelled"],
+  arrived: ["ongoing", "cancelled"],
+  ongoing: ["completed", "cancelled"],
+  completed: [],
+  cancelled: [],
+  declined: ["accepted", "cancelled"],
+};
+
+const ADMIN_BOOKING_STATUS_COPY = {
+  accepted: {
+    customerTitle: "Booking confirmed",
+    customerBody: "Your booking has been confirmed by the OWVO team.",
+    providerTitle: "Booking confirmed",
+    providerBody: "A booking assigned to you has been confirmed.",
+  },
+  arrived: {
+    customerTitle: "Provider arrived",
+    customerBody: "Your provider has been marked as arrived for your booking.",
+    providerTitle: "Marked as arrived",
+    providerBody: "You have been marked as arrived for a booking.",
+  },
+  ongoing: {
+    customerTitle: "Wash started",
+    customerBody: "Your car wash is now in progress.",
+    providerTitle: "Wash started",
+    providerBody: "A booking has been marked as in progress.",
+  },
+  completed: {
+    customerTitle: "Booking completed",
+    customerBody:
+      "Your booking has been marked as completed. Thank you for using OWVO.",
+    providerTitle: "Booking completed",
+    providerBody: "A booking has been marked as completed.",
+  },
+  cancelled: {
+    customerTitle: "Booking cancelled",
+    customerBody: "Your booking has been cancelled by the OWVO team.",
+    providerTitle: "Booking cancelled",
+    providerBody: "A booking assigned to you has been cancelled.",
+  },
+};
+
 const startOfDay = (date = new Date()) =>
   new Date(date.getFullYear(), date.getMonth(), date.getDate());
 
@@ -1015,8 +1061,7 @@ export const getAllCustomers = catchAsync(async (req, res) => {
     })
     .lean();
   const customerIds = customers.map((customer) => customer._id).filter(Boolean);
-  const [ratingStats, recentReviews, bookingTotals, latestAddresses] =
-    await Promise.all([
+  const [ratingStats, recentReviews, bookingTotals] = await Promise.all([
     UserRating.aggregate([
       { $match: { user: { $in: customerIds } } },
       {
@@ -1046,17 +1091,7 @@ export const getAllCustomers = catchAsync(async (req, res) => {
         },
       },
     ]),
-    Booking.aggregate([
-      { $match: { user: { $in: customerIds } } },
-      { $sort: { createdAt: -1 } },
-      {
-        $group: {
-          _id: "$user",
-          latestAddress: { $first: "$address.addressLine" },
-        },
-      },
-    ]),
-    ]);
+  ]);
   const ratingsByCustomerId = new Map(
     ratingStats.map((stat) => [
       stat._id.toString(),
@@ -1091,12 +1126,8 @@ export const getAllCustomers = catchAsync(async (req, res) => {
       },
     ])
   );
-  const latestAddressByCustomerId = new Map(
-    latestAddresses.map((row) => [row._id.toString(), row.latestAddress || ""])
-  );
   const data = customers.map((customer) => ({
     ...customer,
-    latestAddress: latestAddressByCustomerId.get(customer._id.toString()) || "",
     ...ratingsByCustomerId.get(customer._id.toString()),
     ...(totalsByCustomerId.get(customer._id.toString()) || {
       totalBookings: 0,
@@ -1146,6 +1177,14 @@ export const createAdminBooking = catchAsync(async (req, res) => {
     address,
     notes: notes || "",
     status: "accepted",
+    statusHistory: [
+      {
+        status: "accepted",
+        at: new Date(),
+        by: "admin",
+        note: "Created from admin panel",
+      },
+    ],
     price: service.price,
     finalPrice: service.price,
     payment: { status: "pending" },
@@ -1225,22 +1264,144 @@ export const getAdminBookings = catchAsync(async (req, res) => {
 export const getAdminBookingById = catchAsync(async (req, res) => {
   const { id } = req.params;
 
-  const booking = await Booking.findById(id).populate(bookingPopulate);
-  if (!booking) {
+  if (!mongoose.Types.ObjectId.isValid(id)) {
     throw new AppError(httpStatus.NOT_FOUND, "Booking not found");
+  }
+
+  const bookingDoc = await Booking.findById(id).populate(bookingPopulate);
+  if (!bookingDoc) {
+    throw new AppError(httpStatus.NOT_FOUND, "Booking not found");
+  }
+  const booking = bookingDoc.toObject();
+
+  // Is booking ki payment entries (booking fee + tips) - Payment tab ke liye.
+  const payments = await paymentInfo
+    .find({ bookingId: booking._id })
+    .sort({ createdAt: 1 })
+    .lean();
+  const tipsTotal = payments
+    .filter((p) => p.type === "tips" && p.paymentStatus === "complete")
+    .reduce((sum, p) => sum + (Number(p.price) || 0), 0);
+
+  // Dono taraf ki ratings: provider ko mili (Rating) + customer ko mili
+  // (UserRating). Na ho to null - panel imaandaar khaali haalat dikhayega.
+  const [providerRatingDoc, customerRatingDoc] = await Promise.all([
+    Rating.findOne({ booking: booking._id })
+      .select("rating review createdAt")
+      .lean(),
+    UserRating.findOne({ booking: booking._id })
+      .select("rating review createdAt")
+      .lean(),
+  ]);
+
+  // Timeline: recorded statusHistory ho to wahi; warna purani booking ke
+  // liye sirf wohi steps jo maujood timestamps se sabit hote hain - koi
+  // step invent nahi hota.
+  const recorded = Array.isArray(booking.statusHistory)
+    ? booking.statusHistory
+    : [];
+  let timeline;
+  if (recorded.length > 0) {
+    timeline = recorded.map((h) => ({
+      status: h.status,
+      at: h.at || null,
+      by: h.by || "",
+      note: h.note || "",
+      source: "recorded",
+    }));
+  } else {
+    timeline = [
+      {
+        status: "pending",
+        at: booking.createdAt || null,
+        by: "user",
+        note: "",
+        source: "derived",
+      },
+    ];
+    if (booking.arrivedAt) {
+      timeline.push({
+        status: "arrived",
+        at: booking.arrivedAt,
+        by: "",
+        note: "",
+        source: "derived",
+      });
+    }
+    if (booking.completedAt) {
+      timeline.push({
+        status: "completed",
+        at: booking.completedAt,
+        by: "",
+        note: "",
+        source: "derived",
+      });
+    }
+    if (booking.status === "cancelled") {
+      timeline.push({
+        status: "cancelled",
+        at: booking.cancelledAt || null,
+        by: booking.cancelledBy || "",
+        note: booking.cancellationReason || "",
+        source: "derived",
+      });
+    } else if (
+      booking.status !== "pending" &&
+      !timeline.some((t) => t.status === booking.status)
+    ) {
+      timeline.push({
+        status: booking.status,
+        at: null,
+        by: "",
+        note: "",
+        source: "derived",
+      });
+    }
+    timeline.sort((a, b) => {
+      if (!a.at) return 1;
+      if (!b.at) return -1;
+      return new Date(a.at).getTime() - new Date(b.at).getTime();
+    });
   }
 
   sendResponse(res, {
     statusCode: httpStatus.OK,
     success: true,
     message: "Admin booking fetched successfully",
-    data: booking,
+    data: {
+      ...booking,
+      payments,
+      tipsTotal,
+      providerRating: providerRatingDoc
+        ? {
+            rating: providerRatingDoc.rating,
+            review: providerRatingDoc.review || "",
+            at: providerRatingDoc.createdAt,
+          }
+        : null,
+      customerRating: customerRatingDoc
+        ? {
+            rating: customerRatingDoc.rating,
+            review: customerRatingDoc.review || "",
+            at: customerRatingDoc.createdAt,
+          }
+        : null,
+      timeline,
+    },
   });
 });
 
 export const updateAdminBookingStatus = catchAsync(async (req, res) => {
   const { id } = req.params;
-  const { status } = req.body || {};
+  const {
+    status,
+    reason,
+    notes,
+    notifyCustomer,
+    notifyProvider,
+    providerId,
+    estimatedArrival,
+  } = req.body || {};
 
   if (!BOOKING_STATUSES.includes(status)) {
     throw new AppError(httpStatus.BAD_REQUEST, "Invalid booking status");
@@ -1258,11 +1419,76 @@ export const updateAdminBookingStatus = catchAsync(async (req, res) => {
     throw new AppError(httpStatus.NOT_FOUND, "Booking not found");
   }
 
+  if (booking.status === status) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      `Booking is already ${status}`
+    );
+  }
+
+  const allowedNext = BOOKING_TRANSITIONS[booking.status] || [];
+  if (!allowedNext.includes(status)) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      `Booking cannot move from ${booking.status} to ${status}`
+    );
+  }
+
+  const cleanReason = typeof reason === "string" ? reason.trim() : "";
+  if (status === "cancelled" && !cleanReason) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "A cancellation reason is required"
+    );
+  }
+
+  // Accept modal ka Select Provider: accept ke waqt provider badla ja
+  // sakta hai (masalan declined ki hui booking kisi aur ko dena).
+  let providerChanged = false;
+  if (
+    status === "accepted" &&
+    providerId &&
+    mongoose.Types.ObjectId.isValid(providerId) &&
+    String(booking.provider || "") !== String(providerId)
+  ) {
+    const newProvider = await User.findOne({
+      _id: providerId,
+      role: "provider",
+    }).select("_id");
+    if (!newProvider) {
+      throw new AppError(
+        httpStatus.BAD_REQUEST,
+        "Selected provider not found"
+      );
+    }
+    booking.provider = newProvider._id;
+    providerChanged = true;
+  }
+  if (status === "accepted" && estimatedArrival) {
+    const eta = new Date(estimatedArrival);
+    if (!Number.isNaN(eta.getTime())) booking.estimatedArrival = eta;
+  }
+
   booking.status = status;
   if (status === "arrived" && !booking.arrivedAt) {
     booking.arrivedAt = new Date();
     booking.washEndsAt = new Date(booking.arrivedAt.getTime() + 30 * 60 * 1000);
   }
+  if (status === "cancelled") {
+    booking.cancellationReason = cleanReason;
+    booking.cancelledBy = "admin";
+    booking.cancelledAt = new Date();
+  }
+  const cleanNotes = typeof notes === "string" ? notes.trim() : "";
+  booking.statusHistory = [
+    ...(booking.statusHistory || []),
+    {
+      status,
+      at: new Date(),
+      by: "admin",
+      note: status === "cancelled" ? cleanReason : cleanNotes,
+    },
+  ];
 
   await booking.save();
   await refreshProviderBusyState(booking.provider);
@@ -1274,12 +1500,57 @@ export const updateAdminBookingStatus = catchAsync(async (req, res) => {
   await booking.populate(bookingPopulate);
 
   emitDashboardBookingStatus(booking, status, { completedJobs });
+
+  // Customer / provider ko khabar: inbox notification + push. Modal ke
+  // toggles (notifyCustomer / notifyProvider) band hon to nahi jati.
+  const copy = ADMIN_BOOKING_STATUS_COPY[status];
+  if (copy) {
+    const targets = [];
+    if (notifyCustomer !== false && booking.user) {
+      targets.push({
+        userId: booking.user?._id || booking.user,
+        title: copy.customerTitle,
+        body: copy.customerBody,
+      });
+    }
+    if (notifyProvider !== false && booking.provider) {
+      targets.push({
+        userId: booking.provider?._id || booking.provider,
+        title: copy.providerTitle,
+        body: copy.providerBody,
+      });
+    }
+    for (const t of targets) {
+      try {
+        await Notification.create({
+          recipient: t.userId,
+          type: "general",
+          title: t.title,
+          message: t.body,
+          sentBy: req.user._id,
+          metadata: { bookingId: booking._id.toString(), status },
+        });
+      } catch (err) {
+        console.error("Failed to save booking status notification:", err);
+      }
+      notifyUser(t.userId.toString(), {
+        title: t.title,
+        body: t.body,
+        data: {
+          type: "admin_booking_update",
+          bookingId: booking._id.toString(),
+          status,
+        },
+      });
+    }
+  }
+
   await recordActivity({
     req,
     action: "booking.status_updated",
     entityType: "booking",
     entityId: booking._id,
-    metadata: { status },
+    metadata: { status, reason: cleanReason || undefined, providerChanged },
   });
 
   sendResponse(res, {
@@ -2240,53 +2511,6 @@ export const getAdminCustomerDetail = catchAsync(async (req, res) => {
       .lean(),
   ]);
 
-  // View on Map ke liye sab se taza location: (1) active booking ki LIVE
-  // location (customer navigate kar raha ho), (2) profile par saved address
-  // location, (3) latest booking ke address ki location.
-  let mapLocation = null;
-  const liveBooking = await Booking.findOne({
-    user: customerId,
-    status: { $in: ["accepted", "arrived", "ongoing"] },
-    "customerLocation.latitude": { $ne: null },
-    "customerLocation.longitude": { $ne: null },
-  })
-    .sort({ createdAt: -1 })
-    .select("customerLocation")
-    .lean();
-  if (
-    liveBooking?.customerLocation?.latitude != null &&
-    liveBooking?.customerLocation?.longitude != null
-  ) {
-    mapLocation = {
-      lat: liveBooking.customerLocation.latitude,
-      lng: liveBooking.customerLocation.longitude,
-      source: "live",
-      updatedAt: liveBooking.customerLocation.updatedAt || null,
-    };
-  } else if (
-    Array.isArray(customer.location?.coordinates) &&
-    customer.location.coordinates.length === 2 &&
-    (customer.location.coordinates[0] !== 0 ||
-      customer.location.coordinates[1] !== 0)
-  ) {
-    mapLocation = {
-      lat: customer.location.coordinates[1],
-      lng: customer.location.coordinates[0],
-      source: "profile",
-      updatedAt: null,
-    };
-  } else if (
-    bookings[0]?.address?.latitude != null &&
-    bookings[0]?.address?.longitude != null
-  ) {
-    mapLocation = {
-      lat: bookings[0].address.latitude,
-      lng: bookings[0].address.longitude,
-      source: "booking",
-      updatedAt: null,
-    };
-  }
-
   const counts = {};
   statusCounts.forEach((row) => {
     counts[row._id] = row.count;
@@ -2299,8 +2523,6 @@ export const getAdminCustomerDetail = catchAsync(async (req, res) => {
     message: "Customer detail fetched successfully",
     data: {
       customer,
-      latestBookingAddress: bookings[0]?.address?.addressLine || "",
-      mapLocation,
       stats: {
         totalBookings,
         counts: {
@@ -2426,10 +2648,6 @@ export const createAdminCustomer = catchAsync(async (req, res) => {
       "Password must be at least 6 characters"
     );
   }
-  const latitude = Number(req.body?.latitude);
-  const longitude = Number(req.body?.longitude);
-  const hasLocation =
-    Number.isFinite(latitude) && Number.isFinite(longitude);
   let dateOfBirth;
   if (dateOfBirthRaw) {
     dateOfBirth = new Date(dateOfBirthRaw);
@@ -2463,9 +2681,6 @@ export const createAdminCustomer = catchAsync(async (req, res) => {
       role: "user",
       residentialAddress,
       ...(dateOfBirth ? { dateOfBirth } : {}),
-      ...(hasLocation
-        ? { location: { type: "Point", coordinates: [longitude, latitude] } }
-        : {}),
       verificationInfo: { verified: true },
     });
   } catch (error) {
@@ -2569,16 +2784,6 @@ export const updateAdminCustomerProfile = catchAsync(async (req, res) => {
   }
   if (req.body?.residentialAddress !== undefined) {
     customer.residentialAddress = String(req.body.residentialAddress).trim();
-  }
-  if (req.body?.latitude !== undefined || req.body?.longitude !== undefined) {
-    const latitude = Number(req.body?.latitude);
-    const longitude = Number(req.body?.longitude);
-    if (Number.isFinite(latitude) && Number.isFinite(longitude)) {
-      customer.location = {
-        type: "Point",
-        coordinates: [longitude, latitude],
-      };
-    }
   }
 
   try {

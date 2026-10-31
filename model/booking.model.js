@@ -126,6 +126,22 @@ const bookingSchema = new mongoose.Schema(
     cancelledAt: {
       type: Date,
     },
+    statusHistory: [
+      {
+        status: { type: String, default: "" },
+        at: { type: Date, default: Date.now },
+        by: {
+          type: String,
+          enum: ["user", "provider", "admin", "system"],
+          default: "system",
+        },
+        note: { type: String, trim: true, default: "" },
+        _id: false,
+      },
+    ],
+    estimatedArrival: {
+      type: Date,
+    },
     isRated: {
       type: Boolean,
       default: false,
