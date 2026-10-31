@@ -29,6 +29,20 @@ export const protect = catchAsync(async (req, res, next) => {
     throw new AppError(httpStatus.FORBIDDEN, "Account access has been disabled");
   }
 
+  // Customers redesign: suspended/banned customer ki har authenticated
+  // request yahin rukti hai (nayi booking bhi isi protect se guzarti hai).
+  if (
+    user.role === "user" &&
+    ["suspended", "banned"].includes(user.enforcement?.status)
+  ) {
+    throw new AppError(
+      httpStatus.FORBIDDEN,
+      user.enforcement?.reason
+        ? `Your account has been suspended: ${user.enforcement.reason}`
+        : "Your account has been suspended. Please contact support."
+    );
+  }
+
   if (
     user.role === "provider" &&
     user.isOnline &&

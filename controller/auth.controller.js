@@ -182,6 +182,23 @@ export const login = catchAsync(async (req, res) => {
     throw new AppError(httpStatus.FORBIDDEN, "Password is not correct");
   }
   clearFailedLogin(normalizedEmail);
+  // Customers redesign: deactivated/deleted account login nahi kar sakta
+  // (protect wali hi pabandi login par bhi), aur suspended/banned customer
+  // ko wajah ke sath saaf message milta hai.
+  if (user.accountStatus === "disabled" || user.isDeleted) {
+    throw new AppError(httpStatus.FORBIDDEN, "Account access has been disabled");
+  }
+  if (
+    user.role === "user" &&
+    ["suspended", "banned"].includes(user.enforcement?.status)
+  ) {
+    throw new AppError(
+      httpStatus.FORBIDDEN,
+      user.enforcement?.reason
+        ? `Your account has been suspended: ${user.enforcement.reason}`
+        : "Your account has been suspended. Please contact support."
+    );
+  }
   if (!(await User.isOTPVerified(user._id))) {
     const otp = generateOTP();
     const jwtPayloadOTP = {

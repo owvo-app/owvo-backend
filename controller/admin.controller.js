@@ -6,6 +6,8 @@ import Stripe from "stripe";
 import { User } from "../model/user.model.js";
 import AppError from "../errors/AppError.js";
 import sendResponse from "../utils/sendResponse.js";
+import { createToken } from "../utils/authToken.js";
+import { sendEmail } from "../utils/sendEmail.js";
 import catchAsync from "../utils/catch.Async.js";
 import { Booking } from "../model/booking.model.js";
 import { IssueReport } from "../model/issueReport.model.js";
@@ -21,8 +23,10 @@ import { UserRating } from "../model/userRating.model.js";
 import ProviderAcceptance from "../model/providerAcceptance.model.js";
 import { TrainingModule } from "../model/trainingModule.model.js";
 import { Notification } from "../model/notification.model.js";
+import { CustomerNote } from "../model/customerNote.model.js";
+import { Vehicle } from "../model/vehicle.model.js";
 import { ProviderNote } from "../model/providerNote.model.js";
-import { uploadOnCloudinary } from "../utils/common.Method.js";
+import { generateOTP, uploadOnCloudinary } from "../utils/common.Method.js";
 import { emitToUser, broadcast } from "../socket/socket.js";
 import { notifyUser } from "../utils/fcm.util.js";
 import { refreshProviderBusyState } from "../utils/providerBusy.util.js";
@@ -1004,14 +1008,14 @@ export const deleteUser = catchAsync(async (req, res) => {
 });
 
 export const getAllCustomers = catchAsync(async (req, res) => {
-  const customers = await User.find(mergeFilter({ role: "user" }, "createdAt", req.query))
+  const customers = await User.find(mergeFilter({ role: "user", isDeleted: { $ne: true } }, "createdAt", req.query))
     .select(dashboardUserSelect)
     .sort({
       createdAt: -1,
     })
     .lean();
   const customerIds = customers.map((customer) => customer._id).filter(Boolean);
-  const [ratingStats, recentReviews] = await Promise.all([
+  const [ratingStats, recentReviews, bookingTotals] = await Promise.all([
     UserRating.aggregate([
       { $match: { user: { $in: customerIds } } },
       {
@@ -1027,6 +1031,20 @@ export const getAllCustomers = catchAsync(async (req, res) => {
       .populate("provider", "_id name email photo")
       .sort({ createdAt: -1 })
       .lean(),
+    Booking.aggregate([
+      { $match: { user: { $in: customerIds } } },
+      {
+        $group: {
+          _id: "$user",
+          totalBookings: { $sum: 1 },
+          totalSpent: {
+            $sum: {
+              $cond: [{ $eq: ["$status", "completed"] }, "$finalPrice", 0],
+            },
+          },
+        },
+      },
+    ]),
   ]);
   const ratingsByCustomerId = new Map(
     ratingStats.map((stat) => [
@@ -1053,9 +1071,22 @@ export const getAllCustomers = catchAsync(async (req, res) => {
     }
     reviewsByCustomerId.set(customerId, bucket);
   });
+  const totalsByCustomerId = new Map(
+    bookingTotals.map((row) => [
+      row._id.toString(),
+      {
+        totalBookings: row.totalBookings || 0,
+        totalSpent: Math.round((row.totalSpent || 0) * 100) / 100,
+      },
+    ])
+  );
   const data = customers.map((customer) => ({
     ...customer,
     ...ratingsByCustomerId.get(customer._id.toString()),
+    ...(totalsByCustomerId.get(customer._id.toString()) || {
+      totalBookings: 0,
+      totalSpent: 0,
+    }),
     recentReviews: reviewsByCustomerId.get(customer._id.toString()) || [],
   }));
 
@@ -1851,6 +1882,7 @@ export const createAdminProvider = catchAsync(async (req, res) => {
       password,
       role: "provider",
       serviceArea,
+      verificationInfo: { verified: true },
     });
   } catch (error) {
     if (error?.code === 11000) {
@@ -2092,6 +2124,664 @@ export const updateAdminProviderProfile = catchAsync(async (req, res) => {
       providerAddress: provider.providerAddress,
       updatedAt: provider.updatedAt,
     },
+  });
+});
+
+// ─── Customers redesign — detail, notes, message, account actions ──────────
+const findCustomerDoc = async (id) => {
+  const customer = await User.findOne({ _id: id, role: "user" });
+  if (!customer) {
+    throw new AppError(httpStatus.NOT_FOUND, "Customer not found");
+  }
+  return customer;
+};
+
+// GET /admin/customers/:id — detail panel ke liye customer ki profile, stats
+// (total bookings, total spent, dono taraf ki ratings), bookings, vehicles,
+// payments aur reviews ek hi response me.
+export const getAdminCustomerDetail = catchAsync(async (req, res) => {
+  const { id } = req.params;
+  const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+  const customer = await User.findOne({
+    _id: id,
+    role: "user",
+    isDeleted: { $ne: true },
+  })
+    .select(dashboardUserSelect)
+    .lean();
+  if (!customer) {
+    throw new AppError(httpStatus.NOT_FOUND, "Customer not found");
+  }
+  const customerId = customer._id;
+
+  const [
+    statusCounts,
+    spentAgg,
+    tipsAgg,
+    ratingReceivedAgg,
+    ratingGivenAgg,
+    bookings,
+    vehicles,
+    payments,
+    reviewsReceived,
+    reviewsGiven,
+  ] = await Promise.all([
+    Booking.aggregate([
+      { $match: { user: customerId } },
+      { $group: { _id: "$status", count: { $sum: 1 } } },
+    ]),
+    Booking.aggregate([
+      { $match: { user: customerId, status: "completed" } },
+      { $group: { _id: null, total: { $sum: "$finalPrice" } } },
+    ]),
+    paymentInfo.aggregate([
+      {
+        $match: {
+          userId: new mongoose.Types.ObjectId(customerId),
+          type: "tips",
+          paymentStatus: "complete",
+        },
+      },
+      { $group: { _id: null, total: { $sum: "$price" } } },
+    ]),
+    UserRating.aggregate([
+      { $match: { user: customerId } },
+      { $group: { _id: null, avg: { $avg: "$rating" }, count: { $sum: 1 } } },
+    ]),
+    Rating.aggregate([
+      { $match: { user: customerId } },
+      { $group: { _id: null, avg: { $avg: "$rating" }, count: { $sum: 1 } } },
+    ]),
+    Booking.find({ user: customerId })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .populate("provider", "name photo")
+      .populate("service", "title")
+      .populate("vehicle", "registrationNo make model image")
+      .lean(),
+    Vehicle.find({ user: customerId })
+      .sort({ isDefault: -1, createdAt: 1 })
+      .lean(),
+    paymentInfo
+      .find({ userId: customerId, type: { $in: ["booking", "tips"] } })
+      .sort({ createdAt: -1 })
+      .limit(20)
+      .lean(),
+    UserRating.find({ user: customerId })
+      .sort({ createdAt: -1 })
+      .limit(20)
+      .populate("provider", "name photo")
+      .lean(),
+    Rating.find({ user: customerId })
+      .sort({ createdAt: -1 })
+      .limit(20)
+      .populate("provider", "name photo")
+      .populate({
+        path: "booking",
+        select: "service",
+        populate: { path: "service", select: "title" },
+      })
+      .lean(),
+  ]);
+
+  const counts = {};
+  statusCounts.forEach((row) => {
+    counts[row._id] = row.count;
+  });
+  const totalBookings = Object.values(counts).reduce((a, b) => a + b, 0);
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Customer detail fetched successfully",
+    data: {
+      customer,
+      stats: {
+        totalBookings,
+        counts: {
+          completed: counts.completed || 0,
+          cancelled: counts.cancelled || 0,
+          declined: counts.declined || 0,
+          active:
+            (counts.pending || 0) +
+            (counts.accepted || 0) +
+            (counts.arrived || 0) +
+            (counts.ongoing || 0),
+        },
+        totalSpent: r2(spentAgg[0]?.total || 0),
+        tipsGiven: r2(tipsAgg[0]?.total || 0),
+        ratingReceived: {
+          average: ratingReceivedAgg[0]
+            ? Number(ratingReceivedAgg[0].avg.toFixed(1))
+            : 0,
+          count: ratingReceivedAgg[0]?.count || 0,
+        },
+        ratingGiven: {
+          average: ratingGivenAgg[0]
+            ? Number(ratingGivenAgg[0].avg.toFixed(1))
+            : 0,
+          count: ratingGivenAgg[0]?.count || 0,
+        },
+      },
+      bookings: bookings.map((b) => ({
+        _id: b._id,
+        ref: `#B${b._id.toString().slice(-6).toUpperCase()}`,
+        status: b.status,
+        bookingDate: b.bookingDate,
+        finalPrice: b.finalPrice,
+        price: b.price,
+        paymentStatus: b.payment?.status || null,
+        serviceTitle: b.service?.title || "Wash Service",
+        providerName: b.provider?.name || "Provider",
+        providerPhoto: b.provider?.photo?.url || "",
+        vehicle: {
+          registrationNo:
+            b.vehicle?.registrationNo || b.vehicleSnapshot?.registrationNo || "",
+          make: b.vehicle?.make || b.vehicleSnapshot?.make || "",
+          model: b.vehicle?.model || b.vehicleSnapshot?.model || "",
+          image: b.vehicleSnapshot?.image || b.vehicle?.image || "",
+        },
+        address: b.address?.addressLine || "",
+        createdAt: b.createdAt,
+      })),
+      vehicles: vehicles.map((v) => ({
+        _id: v._id,
+        registrationNo: v.registrationNo || "",
+        make: v.make || "",
+        model: v.model || "",
+        year: v.year || null,
+        size: v.size || "",
+        colour: v.colour || "",
+        image: v.image || "",
+        isDefault: Boolean(v.isDefault),
+      })),
+      payments: payments.map((p) => ({
+        _id: p._id,
+        ref: p.bookingId
+          ? `#B${p.bookingId.toString().slice(-6).toUpperCase()}`
+          : "—",
+        type: p.type,
+        amount: p.price,
+        currency: p.currency || "GBP",
+        status: p.paymentStatus || p.status || "",
+        method: p.paymentMethod || "",
+        transactionId: p.transactionId || "",
+        createdAt: p.createdAt,
+      })),
+      reviewsReceived: reviewsReceived.map((r) => ({
+        _id: r._id,
+        rating: r.rating,
+        review: r.review || "",
+        providerName: r.provider?.name || "Provider",
+        providerPhoto: r.provider?.photo?.url || "",
+        bookingRef: r.booking
+          ? `#B${r.booking.toString().slice(-6).toUpperCase()}`
+          : "",
+        createdAt: r.createdAt,
+      })),
+      reviewsGiven: reviewsGiven.map((r) => ({
+        _id: r._id,
+        rating: r.rating,
+        review: r.review || "",
+        providerName: r.provider?.name || "Provider",
+        providerPhoto: r.provider?.photo?.url || "",
+        serviceTitle: r.booking?.service?.title || "",
+        bookingRef: r.booking?._id
+          ? `#B${r.booking._id.toString().slice(-6).toUpperCase()}`
+          : "",
+        createdAt: r.createdAt,
+      })),
+    },
+  });
+});
+
+// POST /admin/customers — admin panel se naya customer account (normal signup
+// wala hi account; admin banata hai is liye OTP verified marked hota hai,
+// warna app login par verification rok lagti).
+export const createAdminCustomer = catchAsync(async (req, res) => {
+  const name = String(req.body?.name || "").trim();
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  const phoneNumber = String(req.body?.phoneNumber || "").trim();
+  const password = String(req.body?.password || "");
+  const residentialAddress = String(req.body?.residentialAddress || "").trim();
+  const dateOfBirthRaw = String(req.body?.dateOfBirth || "").trim();
+
+  if (!name) {
+    throw new AppError(httpStatus.BAD_REQUEST, "Customer name is required");
+  }
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new AppError(httpStatus.BAD_REQUEST, "A valid email address is required");
+  }
+  if (!phoneNumber) {
+    throw new AppError(httpStatus.BAD_REQUEST, "Phone number is required");
+  }
+  if (!password || password.length < 6) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "Password must be at least 6 characters"
+    );
+  }
+  let dateOfBirth;
+  if (dateOfBirthRaw) {
+    dateOfBirth = new Date(dateOfBirthRaw);
+    if (Number.isNaN(dateOfBirth.getTime())) {
+      throw new AppError(httpStatus.BAD_REQUEST, "Invalid date of birth");
+    }
+  }
+
+  const existingEmail = await User.findOne({ email });
+  if (existingEmail) {
+    throw new AppError(
+      httpStatus.CONFLICT,
+      "An account with this email already exists"
+    );
+  }
+  const existingPhone = await User.findOne({ phoneNumber });
+  if (existingPhone) {
+    throw new AppError(
+      httpStatus.CONFLICT,
+      "An account with this phone number already exists"
+    );
+  }
+
+  let customer;
+  try {
+    customer = await User.create({
+      name,
+      email,
+      phoneNumber,
+      password,
+      role: "user",
+      residentialAddress,
+      ...(dateOfBirth ? { dateOfBirth } : {}),
+      verificationInfo: { verified: true },
+    });
+  } catch (error) {
+    if (error?.code === 11000) {
+      throw new AppError(
+        httpStatus.CONFLICT,
+        "An account with this email or phone number already exists"
+      );
+    }
+    if (error?.name === "ValidationError") {
+      const first = Object.values(error.errors || {})[0];
+      throw new AppError(
+        httpStatus.BAD_REQUEST,
+        first?.message || "Invalid customer data"
+      );
+    }
+    throw error;
+  }
+
+  await recordActivity({
+    req,
+    action: "customer.created_by_admin",
+    entityType: "user",
+    entityId: customer._id,
+    metadata: { email: customer.email },
+  });
+
+  sendResponse(res, {
+    statusCode: httpStatus.CREATED,
+    success: true,
+    message: "Customer created successfully",
+    data: {
+      _id: customer._id,
+      name: customer.name,
+      email: customer.email,
+      phoneNumber: customer.phoneNumber,
+      role: customer.role,
+      createdAt: customer.createdAt,
+    },
+  });
+});
+
+// PATCH /admin/customers/:id/profile — basic profile edit (name, email,
+// phone, date of birth, address). Password yahan change NAHI hota.
+export const updateAdminCustomerProfile = catchAsync(async (req, res) => {
+  const customer = await findCustomerDoc(req.params.id);
+
+  if (req.body?.name !== undefined) {
+    const name = String(req.body.name).trim();
+    if (!name) {
+      throw new AppError(httpStatus.BAD_REQUEST, "Customer name is required");
+    }
+    customer.name = name;
+  }
+  if (req.body?.email !== undefined) {
+    const email = String(req.body.email).trim().toLowerCase();
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      throw new AppError(httpStatus.BAD_REQUEST, "A valid email address is required");
+    }
+    if (email !== customer.email) {
+      const duplicate = await User.findOne({ email, _id: { $ne: customer._id } });
+      if (duplicate) {
+        throw new AppError(
+          httpStatus.CONFLICT,
+          "An account with this email already exists"
+        );
+      }
+      customer.email = email;
+    }
+  }
+  if (req.body?.phoneNumber !== undefined) {
+    const phoneNumber = String(req.body.phoneNumber).trim();
+    if (!phoneNumber) {
+      throw new AppError(httpStatus.BAD_REQUEST, "Phone number is required");
+    }
+    if (phoneNumber !== customer.phoneNumber) {
+      const duplicate = await User.findOne({
+        phoneNumber,
+        _id: { $ne: customer._id },
+      });
+      if (duplicate) {
+        throw new AppError(
+          httpStatus.CONFLICT,
+          "An account with this phone number already exists"
+        );
+      }
+      customer.phoneNumber = phoneNumber;
+    }
+  }
+  if (req.body?.dateOfBirth !== undefined) {
+    const raw = String(req.body.dateOfBirth || "").trim();
+    if (!raw) {
+      customer.dateOfBirth = undefined;
+    } else {
+      const parsed = new Date(raw);
+      if (Number.isNaN(parsed.getTime())) {
+        throw new AppError(httpStatus.BAD_REQUEST, "Invalid date of birth");
+      }
+      customer.dateOfBirth = parsed;
+    }
+  }
+  if (req.body?.residentialAddress !== undefined) {
+    customer.residentialAddress = String(req.body.residentialAddress).trim();
+  }
+
+  try {
+    await customer.save();
+  } catch (error) {
+    if (error?.name === "ValidationError") {
+      const first = Object.values(error.errors || {})[0];
+      throw new AppError(
+        httpStatus.BAD_REQUEST,
+        first?.message || "Invalid customer data"
+      );
+    }
+    if (error?.code === 11000) {
+      throw new AppError(
+        httpStatus.CONFLICT,
+        "An account with this email or phone number already exists"
+      );
+    }
+    throw error;
+  }
+
+  await recordActivity({
+    req,
+    action: "customer.profile_updated",
+    entityType: "user",
+    entityId: customer._id,
+    metadata: {},
+  });
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Customer updated successfully",
+    data: {
+      _id: customer._id,
+      name: customer.name,
+      email: customer.email,
+      phoneNumber: customer.phoneNumber,
+      dateOfBirth: customer.dateOfBirth || null,
+      residentialAddress: customer.residentialAddress || "",
+      updatedAt: customer.updatedAt,
+    },
+  });
+});
+
+// PATCH /admin/customers/:id/enforcement — providers wala enforcement hi
+// customers par (suspend ka asal asar auth middleware + login check se ata
+// hai; yahan status + wajah save hoti hai aur audit log banta hai).
+export const updateCustomerEnforcement = catchAsync(async (req, res) => {
+  const { status, reason = "" } = req.body || {};
+  if (!["clear", "warned", "suspended", "banned"].includes(status)) {
+    throw new AppError(httpStatus.BAD_REQUEST, "Invalid enforcement status");
+  }
+  const customer = await findCustomerDoc(req.params.id);
+  customer.enforcement = {
+    status,
+    reason: reason.toString().trim(),
+    updatedBy: req.user._id,
+    updatedAt: new Date(),
+  };
+  await customer.save();
+
+  await recordActivity({
+    req,
+    action: "customer.enforcement_updated",
+    entityType: "user",
+    entityId: customer._id,
+    metadata: { status, reason },
+  });
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Customer enforcement updated successfully",
+    data: {
+      _id: customer._id,
+      name: customer.name,
+      email: customer.email,
+      enforcement: customer.enforcement,
+      accountStatus: customer.accountStatus,
+    },
+  });
+});
+
+// DELETE /admin/customers/:id — soft delete (providers wala pattern): data
+// mehfooz rehta hai, account band + list se ghayab. Active booking (accepted /
+// arrived / ongoing) ho to pehle block.
+export const deleteAdminCustomer = catchAsync(async (req, res) => {
+  const customer = await findCustomerDoc(req.params.id);
+  const activeBooking = await Booking.findOne({
+    user: customer._id,
+    status: { $in: ["accepted", "arrived", "ongoing"] },
+  }).select("_id");
+  if (activeBooking) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "This customer has an active booking in progress. Delete is blocked until it finishes or is cancelled."
+    );
+  }
+  customer.isDeleted = true;
+  customer.deletedAt = new Date();
+  customer.accountStatus = "disabled";
+  customer.enforcement = {
+    status: "banned",
+    reason: "Account deleted by admin",
+    updatedBy: req.user._id,
+    updatedAt: new Date(),
+  };
+  await customer.save();
+
+  await recordActivity({
+    req,
+    action: "customer.deleted",
+    entityType: "user",
+    entityId: customer._id,
+    metadata: { email: customer.email },
+  });
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Customer deleted successfully",
+    data: { _id: customer._id },
+  });
+});
+
+// ─── Customer Notes (admin-only; customer ko kabhi nazar nahi ate) ─────────
+export const getCustomerNotes = catchAsync(async (req, res) => {
+  const customer = await findCustomerDoc(req.params.id);
+  const notes = await CustomerNote.find({ customer: customer._id })
+    .populate("author", "name role")
+    .sort({ createdAt: -1 })
+    .limit(100)
+    .lean();
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Customer notes fetched successfully",
+    data: notes.map((note) => ({
+      _id: note._id,
+      text: note.text,
+      authorName: note.author?.name || "Admin",
+      authorRole: note.author?.role || "",
+      createdAt: note.createdAt,
+    })),
+  });
+});
+
+export const addCustomerNote = catchAsync(async (req, res) => {
+  const customer = await findCustomerDoc(req.params.id);
+  const text = String(req.body?.text || "").trim();
+  if (!text) {
+    throw new AppError(httpStatus.BAD_REQUEST, "Note text is required");
+  }
+  if (text.length > 2000) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "Note is too long (maximum 2000 characters)"
+    );
+  }
+  const note = await CustomerNote.create({
+    customer: customer._id,
+    author: req.user._id,
+    text,
+  });
+  await recordActivity({
+    req,
+    action: "customer.note_added",
+    entityType: "user",
+    entityId: customer._id,
+    metadata: { noteId: note._id },
+  });
+  sendResponse(res, {
+    statusCode: httpStatus.CREATED,
+    success: true,
+    message: "Note added",
+    data: {
+      _id: note._id,
+      text: note.text,
+      authorName: req.user.name || "Admin",
+      authorRole: req.user.role || "",
+      createdAt: note.createdAt,
+    },
+  });
+});
+
+export const deleteCustomerNote = catchAsync(async (req, res) => {
+  const customer = await findCustomerDoc(req.params.id);
+  const note = await CustomerNote.findOne({
+    _id: req.params.noteId,
+    customer: customer._id,
+  });
+  if (!note) {
+    throw new AppError(httpStatus.NOT_FOUND, "Note not found");
+  }
+  await note.deleteOne();
+  await recordActivity({
+    req,
+    action: "customer.note_deleted",
+    entityType: "user",
+    entityId: customer._id,
+    metadata: { noteId: note._id },
+  });
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Note deleted",
+    data: { _id: note._id },
+  });
+});
+
+// POST /admin/customers/:id/message — app inbox (Notification) + FCM push,
+// providers wala hi pattern.
+export const sendCustomerMessage = catchAsync(async (req, res) => {
+  const customer = await findCustomerDoc(req.params.id);
+  const title = String(req.body?.title || "").trim() || "Message from OWVO";
+  const message = String(req.body?.message || "").trim();
+  if (!message) {
+    throw new AppError(httpStatus.BAD_REQUEST, "Message is required");
+  }
+  if (message.length > 1000) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "Message is too long (maximum 1000 characters)"
+    );
+  }
+
+  await Notification.create({
+    recipient: customer._id,
+    type: "general",
+    title,
+    message,
+    sentBy: req.user._id,
+    metadata: { source: "admin_panel" },
+  });
+  notifyUser(customer._id.toString(), {
+    title,
+    body: message,
+    data: { type: "admin_message" },
+  });
+  await recordActivity({
+    req,
+    action: "customer.message_sent",
+    entityType: "user",
+    entityId: customer._id,
+    metadata: { title },
+  });
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Message sent to customer",
+    data: { customerId: customer._id },
+  });
+});
+
+// POST /admin/customers/:id/reset-password — mojooda OTP reset flow ko admin
+// se trigger karna (auth controller ke forgetPassword wala hi tareeqa):
+// OTP banta hai, token save hota hai, email jata hai.
+export const sendCustomerResetPassword = catchAsync(async (req, res) => {
+  const customer = await findCustomerDoc(req.params.id);
+  const otp = generateOTP();
+  const otpToken = createToken(
+    { otp },
+    process.env.OTP_SECRET,
+    process.env.OTP_EXPIRE
+  );
+  customer.password_reset_token = otpToken;
+  await customer.save();
+  await sendEmail(customer.email, "Reset Password", `Your OTP is ${otp}`);
+
+  await recordActivity({
+    req,
+    action: "customer.reset_password_sent",
+    entityType: "user",
+    entityId: customer._id,
+    metadata: { email: customer.email },
+  });
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Password reset OTP sent to the customer's email",
+    data: { customerId: customer._id },
   });
 });
 

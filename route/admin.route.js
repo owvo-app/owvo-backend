@@ -40,6 +40,16 @@ import {
   getDashboardRevenue,
   getDashboardSettings,
   getAllCustomers,
+  getAdminCustomerDetail,
+  createAdminCustomer,
+  updateAdminCustomerProfile,
+  updateCustomerEnforcement,
+  deleteAdminCustomer,
+  getCustomerNotes,
+  addCustomerNote,
+  deleteCustomerNote,
+  sendCustomerMessage,
+  sendCustomerResetPassword,
   getProviderVerificationQueue,
   getRecentBookings,
   getStaffAccounts,
@@ -174,6 +184,16 @@ router.patch("/providers/:providerId/enforcement", protect, isAdmin, updateProvi
 
 router.get("/users", protect, isAdmin, getAllUsers);
 router.get("/customers", protect, hasDashboardMenu("customers"), getAllCustomers);
+router.post("/customers", protect, isAdmin, createAdminCustomer);
+router.get("/customers/:id", protect, hasDashboardMenu("customers"), getAdminCustomerDetail);
+router.patch("/customers/:id/profile", protect, hasDashboardMenu("customers"), updateAdminCustomerProfile);
+router.patch("/customers/:id/enforcement", protect, isAdmin, updateCustomerEnforcement);
+router.delete("/customers/:id", protect, isAdmin, deleteAdminCustomer);
+router.get("/customers/:id/notes", protect, hasDashboardMenu("customers"), getCustomerNotes);
+router.post("/customers/:id/notes", protect, hasDashboardMenu("customers"), addCustomerNote);
+router.delete("/customers/:id/notes/:noteId", protect, hasDashboardMenu("customers"), deleteCustomerNote);
+router.post("/customers/:id/message", protect, hasDashboardMenu("customers"), sendCustomerMessage);
+router.post("/customers/:id/reset-password", protect, hasDashboardMenu("customers"), sendCustomerResetPassword);
 router.patch("/users/:userId/status", protect, isAdmin, updateUserAccountStatus);
 router.patch("/users/:userId/role", protect, isAdmin, changeUserRole);
 router.delete("/users/:userId", protect, isAdmin, deleteUser);
