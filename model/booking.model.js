@@ -142,6 +142,22 @@ const bookingSchema = new mongoose.Schema(
     estimatedArrival: {
       type: Date,
     },
+    refund: {
+      status: {
+        type: String,
+        enum: ["none", "refunded"],
+        default: "none",
+      },
+      amount: { type: Number, default: 0 },
+      refundId: { type: String, default: "" },
+      reason: { type: String, trim: true, default: "" },
+      at: { type: Date, default: null },
+      by: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        default: null,
+      },
+    },
     isRated: {
       type: Boolean,
       default: false,

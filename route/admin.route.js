@@ -26,6 +26,16 @@ import {
   getActivityLogs,
   getAdminBookingById,
   getAdminBookings,
+  exportAdminBookings,
+  getAdminBookingMessages,
+  sendAdminBookingMessage,
+  getAdminBookingNotes,
+  createAdminBookingNote,
+  deleteAdminBookingNote,
+  getAdminBookingDispute,
+  createAdminBookingDispute,
+  refundAdminBooking,
+  sendAdminBookingNotification,
   createAdminBooking,
   getAdminEarnings,
   getAdminMe,
@@ -124,8 +134,18 @@ router.post("/bookings", protect, hasDashboardMenu("bookings"), createAdminBooki
 
 
 router.get("/bookings", protect, hasDashboardMenu("bookings"), getAdminBookings);
+router.get("/bookings/export", protect, hasDashboardMenu("bookings"), exportAdminBookings);
 router.get("/bookings/:id", protect, hasDashboardMenu("bookings"), getAdminBookingById);
 router.patch("/bookings/:id/status", protect, hasDashboardMenu("bookings"), updateAdminBookingStatus);
+router.get("/bookings/:id/messages", protect, hasDashboardMenu("bookings"), getAdminBookingMessages);
+router.post("/bookings/:id/messages", protect, hasDashboardMenu("bookings"), sendAdminBookingMessage);
+router.get("/bookings/:id/notes", protect, hasDashboardMenu("bookings"), getAdminBookingNotes);
+router.post("/bookings/:id/notes", protect, hasDashboardMenu("bookings"), createAdminBookingNote);
+router.delete("/bookings/:id/notes/:noteId", protect, hasDashboardMenu("bookings"), deleteAdminBookingNote);
+router.get("/bookings/:id/dispute", protect, hasDashboardMenu("bookings"), getAdminBookingDispute);
+router.post("/bookings/:id/dispute", protect, hasDashboardMenu("bookings"), createAdminBookingDispute);
+router.post("/bookings/:id/refund", protect, isAdmin, refundAdminBooking);
+router.post("/bookings/:id/notify", protect, hasDashboardMenu("bookings"), sendAdminBookingNotification);
 
 router.get("/reports", protect, hasDashboardMenu("reports"), getAdminReports);
 router.get("/tickets", protect, hasDashboardMenu("reports"), getAdminTickets);

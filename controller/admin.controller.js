@@ -24,6 +24,10 @@ import ProviderAcceptance from "../model/providerAcceptance.model.js";
 import { TrainingModule } from "../model/trainingModule.model.js";
 import { Notification } from "../model/notification.model.js";
 import { CustomerNote } from "../model/customerNote.model.js";
+import { BookingNote } from "../model/bookingNote.model.js";
+import { ChatMessage } from "../model/chatMessage.model.js";
+import { SupportTicket } from "../model/supportTicket.model.js";
+import { Addon } from "../model/addon.model.js";
 import { Vehicle } from "../model/vehicle.model.js";
 import { ProviderNote } from "../model/providerNote.model.js";
 import { generateOTP, uploadOnCloudinary } from "../utils/common.Method.js";
@@ -1145,14 +1149,28 @@ export const getAllCustomers = catchAsync(async (req, res) => {
 });
 
 export const createAdminBooking = catchAsync(async (req, res) => {
-  const { customerId, providerId, serviceId, bookingDate, address, notes } = req.body;
+  const {
+    customerId,
+    providerId,
+    serviceId,
+    vehicleId,
+    addonIds,
+    bookingDate,
+    address,
+    notes,
+  } = req.body;
 
   if (!customerId || !providerId || !serviceId || !bookingDate || !address) {
-    throw new AppError(httpStatus.BAD_REQUEST, "Missing required fields: customerId, providerId, serviceId, bookingDate, address");
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "Missing required fields: customerId, providerId, serviceId, bookingDate, address"
+    );
   }
 
+  // NOTE: customer ki role "user" hai (User model enum) — purana code
+  // "customer" check karta tha jo hamesha fail hota tha.
   const customer = await User.findById(customerId);
-  if (!customer || customer.role !== "customer") {
+  if (!customer || customer.role !== "user") {
     throw new AppError(httpStatus.NOT_FOUND, "Customer not found");
   }
 
@@ -1165,16 +1183,89 @@ export const createAdminBooking = catchAsync(async (req, res) => {
     .select("_id title price serviceType")
     .lean();
   if (!service) {
-    throw new AppError(httpStatus.NOT_FOUND, "Service not found");
+    throw new AppError(
+      httpStatus.NOT_FOUND,
+      "Service not found or inactive"
+    );
   }
+
+  // Address: naya form object bhejta hai (Google Places se lat/lng ke sath);
+  // purani string shakal bhi qabool hai (coords 0 rahenge, map hide hoga).
+  const addressObj =
+    typeof address === "string"
+      ? { addressLine: address.trim(), latitude: 0, longitude: 0 }
+      : {
+          addressLine: String(address.addressLine || "").trim(),
+          latitude: Number(address.latitude) || 0,
+          longitude: Number(address.longitude) || 0,
+        };
+  if (!addressObj.addressLine) {
+    throw new AppError(httpStatus.BAD_REQUEST, "Address is required");
+  }
+  const postcodeMatch = addressObj.addressLine.match(
+    /[A-Za-z]{1,2}\d[A-Za-z\d]?\s*\d[A-Za-z]{2}\b/
+  );
+  const postalCode = postcodeMatch
+    ? postcodeMatch[0].toUpperCase()
+    : undefined;
+
+  // Vehicle (optional): sirf customer ka apna vehicle snapshot banega.
+  let vehicleDoc = null;
+  let vehicleSnapshot;
+  if (vehicleId) {
+    vehicleDoc = await Vehicle.findOne({
+      _id: vehicleId,
+      user: customerId,
+    }).lean();
+    if (!vehicleDoc) {
+      throw new AppError(
+        httpStatus.BAD_REQUEST,
+        "Selected vehicle was not found for this customer"
+      );
+    }
+    vehicleSnapshot = {
+      registrationNo: vehicleDoc.registrationNo || "",
+      make: vehicleDoc.make || "",
+      model: vehicleDoc.model || "",
+      year: vehicleDoc.year || null,
+      size: vehicleDoc.size || "",
+      image:
+        typeof vehicleDoc.image === "string"
+          ? vehicleDoc.image
+          : vehicleDoc.image?.url || "",
+    };
+  }
+
+  // Add-ons: keemat hamesha server catalog se — client ki bheji hui price
+  // par kabhi bharosa nahi.
+  let addons = [];
+  if (Array.isArray(addonIds) && addonIds.length) {
+    const addonDocs = await Addon.find({
+      _id: { $in: addonIds },
+      isActive: true,
+    })
+      .select("_id name price")
+      .lean();
+    addons = addonDocs.map((a) => ({
+      addon: a._id,
+      name: a.name,
+      price: Number(a.price) || 0,
+    }));
+  }
+  const addonsTotal = addons.reduce((sum, a) => sum + a.price, 0);
+  const price = (Number(service.price) || 0) + addonsTotal;
 
   const booking = await Booking.create({
     user: customerId,
     provider: providerId,
     service: serviceId,
-    serviceSnapshot: { title: service.title, price: service.price },
+    ...(vehicleDoc ? { vehicle: vehicleDoc._id } : {}),
+    ...(vehicleSnapshot ? { vehicleSnapshot } : {}),
+    addons,
+    addonsTotal,
     bookingDate: new Date(bookingDate),
-    address,
+    address: addressObj,
+    ...(postalCode ? { postalCode } : {}),
     notes: notes || "",
     status: "accepted",
     statusHistory: [
@@ -1185,53 +1276,75 @@ export const createAdminBooking = catchAsync(async (req, res) => {
         note: "Created from admin panel",
       },
     ],
-    price: service.price,
-    finalPrice: service.price,
-    payment: { status: "pending" },
-    createdBy: req.user._id,
-    createdByRole: "admin",
+    price,
+    finalPrice: price,
+    payment: { method: "online", status: "pending" },
   });
 
-  // Notify provider via socket
+  // Provider ko socket par foran khabar (purana behavior barqarar).
   try {
     emitToUser(providerId.toString(), "new_booking_request", {
       bookingId: booking._id.toString(),
       message: `New booking assigned by admin: ${service.title}`,
     });
-  } catch (e) { /* socket optional */ }
+  } catch (e) {
+    /* socket optional */
+  }
+
+  // Dono taraf inbox notification + push (best effort).
+  try {
+    await Notification.create([
+      {
+        recipient: providerId,
+        type: "general",
+        title: "New booking assigned",
+        message: `Admin created a booking for ${service.title}.`,
+        sentBy: req.user._id,
+        metadata: { bookingId: booking._id },
+      },
+      {
+        recipient: customerId,
+        type: "general",
+        title: "Booking confirmed",
+        message: `Your ${service.title} booking was created by OWVO support.`,
+        sentBy: req.user._id,
+        metadata: { bookingId: booking._id },
+      },
+    ]);
+    notifyUser(providerId.toString(), {
+      title: "New booking assigned",
+      body: `Admin created a booking for ${service.title}.`,
+      data: {
+        type: "admin_booking_created",
+        bookingId: booking._id.toString(),
+      },
+    });
+    notifyUser(customerId.toString(), {
+      title: "Booking confirmed",
+      body: `Your ${service.title} booking was created by OWVO support.`,
+      data: {
+        type: "admin_booking_created",
+        bookingId: booking._id.toString(),
+      },
+    });
+  } catch (e) {
+    /* notifications best effort */
+  }
+
+  const populated = await Booking.findById(booking._id).populate(
+    bookingPopulate
+  );
 
   res.status(httpStatus.CREATED).json({
     success: true,
-    data: booking,
+    data: populated,
   });
 });
 
-export const getAdminBookings = catchAsync(async (req, res) => {
-  const {
-    status,
-    providerId,
-    customerId,
-    from,
-    to,
-    limit = 50,
-    page = 1,
-  } = req.query;
 
-  const filter = {};
-  if (status && BOOKING_STATUSES.includes(status)) filter.status = status;
-  if (providerId && mongoose.Types.ObjectId.isValid(providerId)) {
-    filter.provider = providerId;
-  }
-  if (customerId && mongoose.Types.ObjectId.isValid(customerId)) {
-    filter.user = customerId;
-  }
-  if (from || to) {
-    filter.bookingDate = {};
-    if (from) filter.bookingDate.$gte = new Date(from);
-    if (to) filter.bookingDate.$lte = new Date(to);
-  } else {
-    Object.assign(filter, dateFilter("bookingDate", req.query));
-  }
+export const getAdminBookings = catchAsync(async (req, res) => {
+  const { limit = 50, page = 1 } = req.query;
+  const { filter, rangeBase } = await bkBuildBookingFilters(req.query);
 
   const pageNumber = Math.max(Number(page) || 1, 1);
   const pageSize = Math.min(Math.max(Number(limit) || 50, 1), 100);
@@ -1245,21 +1358,136 @@ export const getAdminBookings = catchAsync(async (req, res) => {
     Booking.countDocuments(filter),
   ]);
 
+  const plain = items.map((b) => b.toObject());
+
+  // Is page ke providers ki asal ratings (Rating collection) + har booking
+  // par open-dispute flag — table inhi ko dikhati hai, koi andaza nahi.
+  const providerIds = [
+    ...new Set(
+      plain.map((b) => b.provider?._id?.toString()).filter(Boolean)
+    ),
+  ];
+  const bookingIds = plain.map((b) => b._id);
+  const [ratingAgg, openDisputeIds] = await Promise.all([
+    providerIds.length
+      ? Rating.aggregate([
+          {
+            $match: {
+              provider: {
+                $in: providerIds.map(
+                  (id) => new mongoose.Types.ObjectId(id)
+                ),
+              },
+            },
+          },
+          {
+            $group: {
+              _id: "$provider",
+              avg: { $avg: "$rating" },
+              count: { $sum: 1 },
+            },
+          },
+        ])
+      : Promise.resolve([]),
+    bookingIds.length
+      ? SupportTicket.find({
+          booking: { $in: bookingIds },
+          type: "dispute",
+          status: { $in: ["open", "in_progress"] },
+        }).distinct("booking")
+      : Promise.resolve([]),
+  ]);
+  const ratingMap = new Map(ratingAgg.map((r) => [r._id.toString(), r]));
+  const disputeSet = new Set(openDisputeIds.map((x) => x.toString()));
+  for (const item of plain) {
+    const pid = item.provider?._id?.toString();
+    const r = pid ? ratingMap.get(pid) : null;
+    item.providerRating = r
+      ? { average: Math.round(r.avg * 10) / 10, count: r.count }
+      : { average: 0, count: 0 };
+    item.hasOpenDispute = disputeSet.has(item._id.toString());
+  }
+
+  // Summary cards (range ke kul numbers) + location options.
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const [statusAgg, newThisMonth, locationRows] = await Promise.all([
+    Booking.aggregate([
+      { $match: rangeBase },
+      { $group: { _id: "$status", count: { $sum: 1 } } },
+    ]),
+    Booking.countDocuments({ ...rangeBase, createdAt: { $gte: monthStart } }),
+    Booking.find(rangeBase)
+      .select("postalCode address.addressLine")
+      .limit(2000)
+      .lean(),
+  ]);
+  const byStatus = {
+    pending: 0,
+    accepted: 0,
+    arrived: 0,
+    ongoing: 0,
+    completed: 0,
+    cancelled: 0,
+    declined: 0,
+  };
+  let totalAll = 0;
+  for (const row of statusAgg) {
+    if (row._id in byStatus) byStatus[row._id] = row.count;
+    totalAll += row.count;
+  }
+  const locMap = new Map();
+  for (const row of locationRows) {
+    const outward = (row.postalCode || "")
+      .toString()
+      .trim()
+      .split(" ")[0]
+      .toUpperCase();
+    if (!outward) continue;
+    const segments = (row.address?.addressLine || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const town =
+      segments.length >= 2
+        ? segments[segments.length - 2]
+        : segments[0] || "";
+    const entry =
+      locMap.get(outward) || { value: outward, count: 0, towns: new Map() };
+    entry.count += 1;
+    if (town) entry.towns.set(town, (entry.towns.get(town) || 0) + 1);
+    locMap.set(outward, entry);
+  }
+  const locations = [...locMap.values()]
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 50)
+    .map((e) => {
+      const topTown =
+        [...e.towns.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || "";
+      return {
+        value: e.value,
+        label: topTown ? `${e.value} · ${topTown}` : e.value,
+      };
+    });
+
   sendResponse(res, {
     statusCode: httpStatus.OK,
     success: true,
     message: "Admin bookings fetched successfully",
     data: {
-      items,
+      items: plain,
       pagination: {
         page: pageNumber,
         limit: pageSize,
         total,
         pages: Math.ceil(total / pageSize),
       },
+      summary: { total: totalAll, byStatus, newThisMonth },
+      locations,
     },
   });
 });
+
 
 export const getAdminBookingById = catchAsync(async (req, res) => {
   const { id } = req.params;
@@ -1293,6 +1521,41 @@ export const getAdminBookingById = catchAsync(async (req, res) => {
       .select("rating review createdAt")
       .lean(),
   ]);
+
+  // Provider ke kul numbers: asal rating average/count (Rating collection)
+  // aur mukammal jobs ki tadaad — panel ke "jobs done" isi se banta hai.
+  const providerRefId = booking.provider?._id || booking.provider;
+  const [providerAgg, providerCompletedJobs, openDispute] =
+    await Promise.all([
+      Rating.aggregate([
+        { $match: { provider: providerRefId } },
+        {
+          $group: {
+            _id: null,
+            avg: { $avg: "$rating" },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+      Booking.countDocuments({
+        provider: providerRefId,
+        status: "completed",
+      }),
+      SupportTicket.findOne({
+        booking: booking._id,
+        type: "dispute",
+        status: { $in: ["open", "in_progress"] },
+      })
+        .select("ticketNumber status priority createdAt")
+        .lean(),
+    ]);
+  const providerStats = {
+    ratingAverage: providerAgg[0]
+      ? Math.round(providerAgg[0].avg * 10) / 10
+      : 0,
+    ratingCount: providerAgg[0]?.count || 0,
+    completedJobs: providerCompletedJobs,
+  };
 
   // Timeline: recorded statusHistory ho to wahi; warna purani booking ke
   // liye sirf wohi steps jo maujood timestamps se sabit hote hain - koi
@@ -1387,6 +1650,8 @@ export const getAdminBookingById = catchAsync(async (req, res) => {
           }
         : null,
       timeline,
+      providerStats,
+      openDispute: openDispute || null,
     },
   });
 });
@@ -5231,5 +5496,504 @@ export const sendVerificationReminder = catchAsync(async (req, res) => {
     success: true,
     message: "Reminder sent",
     data: notification,
+  });
+});
+
+
+// ─── Bookings redesign: export / chat / notes / dispute / refund ───
+
+const bkCsvCell = (value) => {
+  const s = value === null || value === undefined ? "" : String(value);
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+};
+
+// GET /admin/bookings/export — maujooda filters (ya selected ids) ki CSV.
+export const exportAdminBookings = catchAsync(async (req, res) => {
+  const { filter } = await bkBuildBookingFilters(req.query);
+  if (req.query.ids) {
+    const ids = String(req.query.ids)
+      .split(",")
+      .filter((id) => mongoose.Types.ObjectId.isValid(id));
+    filter._id = { $in: ids };
+  }
+  const rows = await Booking.find(filter)
+    .populate(bookingPopulate)
+    .sort({ bookingDate: -1 })
+    .limit(5000)
+    .lean();
+
+  const header = [
+    "Booking ID",
+    "Date",
+    "Customer",
+    "Customer Phone",
+    "Provider",
+    "Service",
+    "Vehicle",
+    "Add-ons",
+    "Amount",
+    "Currency",
+    "Payment Status",
+    "Booking Status",
+    "Postcode",
+    "Address",
+  ];
+  const lines = rows.map((b) => {
+    const vehicleText = b.vehicleSnapshot
+      ? [
+          b.vehicleSnapshot.make,
+          b.vehicleSnapshot.model,
+          b.vehicleSnapshot.registrationNo,
+        ]
+          .filter(Boolean)
+          .join(" ")
+      : "";
+    const addonsText = (b.addons || [])
+      .map((a) => a.name)
+      .filter(Boolean)
+      .join("; ");
+    const paymentStatus =
+      b.refund?.status === "refunded"
+        ? "Refunded"
+        : b.payment?.status || "pending";
+    return [
+      `#B${b._id.toString().slice(-6).toUpperCase()}`,
+      b.bookingDate ? new Date(b.bookingDate).toISOString() : "",
+      b.user?.name || "",
+      b.user?.phoneNumber || "",
+      b.provider?.name || "",
+      b.service?.title || "",
+      vehicleText,
+      addonsText,
+      b.finalPrice ?? "",
+      b.currency || "GBP",
+      paymentStatus,
+      b.status,
+      b.postalCode || "",
+      b.address?.addressLine || "",
+    ]
+      .map(bkCsvCell)
+      .join(",");
+  });
+
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename="bookings-export-${new Date()
+      .toISOString()
+      .slice(0, 10)}.csv"`
+  );
+  res.status(httpStatus.OK).send([header.join(","), ...lines].join("\n"));
+});
+
+const bkLoadBookingOr404 = async (id) => {
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    throw new AppError(httpStatus.NOT_FOUND, "Booking not found");
+  }
+  const booking = await Booking.findById(id);
+  if (!booking) {
+    throw new AppError(httpStatus.NOT_FOUND, "Booking not found");
+  }
+  return booking;
+};
+
+// ─── Booking chat (admin side) ───
+// Messages wahi ChatMessage collection hai jo app use karti hai — query
+// sirf booking par hai, is liye admin ka message dono taraf dikhega.
+export const getAdminBookingMessages = catchAsync(async (req, res) => {
+  const booking = await bkLoadBookingOr404(req.params.id);
+  const messages = await ChatMessage.find({ booking: booking._id })
+    .populate("sender", "name photo role")
+    .sort({ createdAt: 1 })
+    .lean();
+
+  const customerId = booking.user.toString();
+  const providerId = booking.provider.toString();
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Booking messages fetched successfully",
+    data: messages.map((m) => {
+      const senderId = m.sender?._id?.toString() || m.sender?.toString();
+      return {
+        _id: m._id,
+        text: m.text || "",
+        attachment: m.attachment || null,
+        senderId,
+        senderName: m.sender?.name || "",
+        senderPhoto: m.sender?.photo?.url || "",
+        isAdmin:
+          m.sender?.role === "admin" ||
+          m.sender?.role === "staff" ||
+          (senderId !== customerId && senderId !== providerId),
+        createdAt: m.createdAt,
+      };
+    }),
+  });
+});
+
+export const sendAdminBookingMessage = catchAsync(async (req, res) => {
+  const booking = await bkLoadBookingOr404(req.params.id);
+  const text = String(req.body?.text || "").trim();
+  if (!text) {
+    throw new AppError(httpStatus.BAD_REQUEST, "Message text is required");
+  }
+  if (text.length > 2000) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "Message is too long (max 2000 characters)"
+    );
+  }
+
+  const message = await ChatMessage.create({
+    booking: booking._id,
+    sender: req.user._id,
+    recipient: booking.user,
+    participants: [booking.user, booking.provider, req.user._id],
+    text,
+  });
+
+  const payload = {
+    id: message._id.toString(),
+    bookingId: booking._id.toString(),
+    senderId: req.user._id.toString(),
+    senderName: req.user.name || "OWVO Support",
+    recipientId: booking.user.toString(),
+    text,
+    attachment: null,
+    isAdmin: true,
+    createdAt: message.createdAt,
+  };
+
+  // Dono taraf live delivery + offline ho to push.
+  try {
+    emitToUser(booking.user.toString(), "chat_message", payload);
+    emitToUser(booking.provider.toString(), "chat_message", payload);
+  } catch (e) {
+    /* socket optional */
+  }
+  try {
+    const pushPayload = {
+      title: "New message from OWVO Support",
+      body: text.slice(0, 120),
+      data: { type: "chat_message", bookingId: booking._id.toString() },
+    };
+    notifyUser(booking.user.toString(), pushPayload);
+    notifyUser(booking.provider.toString(), pushPayload);
+  } catch (e) {
+    /* push best effort */
+  }
+
+  sendResponse(res, {
+    statusCode: httpStatus.CREATED,
+    success: true,
+    message: "Message sent",
+    data: {
+      _id: message._id,
+      text,
+      attachment: null,
+      senderId: req.user._id.toString(),
+      senderName: req.user.name || "OWVO Support",
+      senderPhoto: "",
+      isAdmin: true,
+      createdAt: message.createdAt,
+    },
+  });
+});
+
+// ─── Booking notes (admin-only) ───
+export const getAdminBookingNotes = catchAsync(async (req, res) => {
+  const booking = await bkLoadBookingOr404(req.params.id);
+  const notes = await BookingNote.find({ booking: booking._id })
+    .populate("author", "name")
+    .sort({ createdAt: -1 })
+    .lean();
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Booking notes fetched successfully",
+    data: notes.map((n) => ({
+      _id: n._id,
+      text: n.text,
+      authorName: n.author?.name || "Admin",
+      createdAt: n.createdAt,
+    })),
+  });
+});
+
+export const createAdminBookingNote = catchAsync(async (req, res) => {
+  const booking = await bkLoadBookingOr404(req.params.id);
+  const text = String(req.body?.text || "").trim();
+  if (!text) {
+    throw new AppError(httpStatus.BAD_REQUEST, "Note text is required");
+  }
+  const note = await BookingNote.create({
+    booking: booking._id,
+    author: req.user._id,
+    text,
+  });
+  sendResponse(res, {
+    statusCode: httpStatus.CREATED,
+    success: true,
+    message: "Note added",
+    data: {
+      _id: note._id,
+      text: note.text,
+      authorName: req.user.name || "Admin",
+      createdAt: note.createdAt,
+    },
+  });
+});
+
+export const deleteAdminBookingNote = catchAsync(async (req, res) => {
+  const booking = await bkLoadBookingOr404(req.params.id);
+  const deleted = await BookingNote.findOneAndDelete({
+    _id: req.params.noteId,
+    booking: booking._id,
+  });
+  if (!deleted) {
+    throw new AppError(httpStatus.NOT_FOUND, "Note not found");
+  }
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Note deleted",
+    data: { _id: deleted._id },
+  });
+});
+
+// ─── Booking dispute (SupportTicket link) ───
+const bkMapDispute = (t) =>
+  t
+    ? {
+        _id: t._id,
+        ticketNumber: t.ticketNumber || "",
+        subject: t.subject || "",
+        description: t.description || "",
+        priority: t.priority || "medium",
+        status: t.status || "open",
+        createdAt: t.createdAt,
+        updatedAt: t.updatedAt,
+      }
+    : null;
+
+export const getAdminBookingDispute = catchAsync(async (req, res) => {
+  const booking = await bkLoadBookingOr404(req.params.id);
+  const ticket = await SupportTicket.findOne({
+    booking: booking._id,
+    type: "dispute",
+  })
+    .sort({ createdAt: -1 })
+    .lean();
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Booking dispute fetched successfully",
+    data: { dispute: bkMapDispute(ticket) },
+  });
+});
+
+export const createAdminBookingDispute = catchAsync(async (req, res) => {
+  const booking = await bkLoadBookingOr404(req.params.id);
+  const description = String(req.body?.description || "").trim();
+  if (!description) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "Dispute description is required"
+    );
+  }
+  const existingOpen = await SupportTicket.findOne({
+    booking: booking._id,
+    type: "dispute",
+    status: { $in: ["open", "in_progress"] },
+  }).select("_id ticketNumber");
+  if (existingOpen) {
+    throw new AppError(
+      httpStatus.CONFLICT,
+      `An open dispute already exists for this booking (${existingOpen.ticketNumber || "ticket"})`
+    );
+  }
+  const short = booking._id.toString().slice(-6).toUpperCase();
+  const subject =
+    String(req.body?.subject || "").trim() || `Dispute for booking #B${short}`;
+  const priority = ["low", "medium", "high"].includes(req.body?.priority)
+    ? req.body.priority
+    : "medium";
+
+  // SupportTicket schema reporter ko customer/provider mangta hai — dispute
+  // booking ke customer ke naam par khulta hai, pehla message admin ka
+  // hota hai taake Support & Disputes page par sab saaf nazar aye.
+  const ticket = await SupportTicket.create({
+    reporter: booking.user,
+    reporterRole: "customer",
+    reportedUser: booking.provider,
+    booking: booking._id,
+    type: "dispute",
+    priority,
+    subject,
+    description,
+    messages: [
+      { sender: req.user._id, senderRole: "admin", text: description },
+    ],
+  });
+
+  sendResponse(res, {
+    statusCode: httpStatus.CREATED,
+    success: true,
+    message: "Dispute created",
+    data: { dispute: bkMapDispute(ticket.toObject()) },
+  });
+});
+
+// ─── Booking notification (standalone — status change ke baghair) ───
+export const sendAdminBookingNotification = catchAsync(async (req, res) => {
+  const booking = await bkLoadBookingOr404(req.params.id);
+  const message = String(req.body?.message || "").trim();
+  if (!message) {
+    throw new AppError(httpStatus.BAD_REQUEST, "Message is required");
+  }
+  const targets = [];
+  if (req.body?.notifyCustomer !== false) {
+    targets.push({ userId: booking.user, who: "customer" });
+  }
+  if (req.body?.notifyProvider !== false) {
+    targets.push({ userId: booking.provider, who: "provider" });
+  }
+  if (!targets.length) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "Select at least one recipient"
+    );
+  }
+  for (const t of targets) {
+    await Notification.create({
+      recipient: t.userId,
+      type: "general",
+      title: "Message from OWVO",
+      message,
+      sentBy: req.user._id,
+      metadata: { bookingId: booking._id },
+    });
+    notifyUser(t.userId.toString(), {
+      title: "Message from OWVO",
+      body: message.slice(0, 120),
+      data: {
+        type: "admin_notification",
+        bookingId: booking._id.toString(),
+      },
+    });
+  }
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Notification sent",
+    data: { notified: targets.map((t) => t.who) },
+  });
+});
+
+// ─── Refund (admin only — route par isAdmin) ───
+// Poori rakam ka refund: booking ki completed payment entry ke Stripe
+// PaymentIntent par. Booking ka status NAHI badalta; refund booking.refund
+// me record hota hai aur har jagah "Refunded" dikhta hai.
+export const refundAdminBooking = catchAsync(async (req, res) => {
+  const booking = await bkLoadBookingOr404(req.params.id);
+
+  if (booking.payment?.status !== "paid") {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "This booking has not been paid — there is nothing to refund."
+    );
+  }
+  if (booking.refund?.status === "refunded") {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "This booking has already been refunded."
+    );
+  }
+
+  const record = await paymentInfo
+    .findOne({
+      bookingId: booking._id,
+      type: "booking",
+      paymentStatus: "complete",
+    })
+    .sort({ createdAt: -1 });
+  const transactionId = record?.transactionId || booking.payment?.trxId;
+  if (!record || !transactionId) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "No completed Stripe payment was found for this booking."
+    );
+  }
+  const amountGbp = Number(record.price) || 0;
+  if (amountGbp <= 0) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "The recorded payment amount is invalid."
+    );
+  }
+
+  let stripeRefund;
+  try {
+    stripeRefund = await getStripe().refunds.create({
+      payment_intent: transactionId,
+      amount: Math.round(amountGbp * 100),
+    });
+  } catch (err) {
+    throw new AppError(
+      httpStatus.BAD_GATEWAY,
+      `Stripe refund failed: ${err?.message || "unknown error"}`
+    );
+  }
+
+  booking.refund = {
+    status: "refunded",
+    amount: amountGbp,
+    refundId: stripeRefund.id,
+    reason: String(req.body?.reason || "").trim(),
+    at: new Date(),
+    by: req.user._id,
+  };
+  await booking.save();
+
+  await recordActivity(
+    req.user._id,
+    "booking.refunded",
+    "Booking",
+    booking._id,
+    `Refunded £${amountGbp.toFixed(2)} for booking ${booking._id}`,
+    { refundId: stripeRefund.id, amount: amountGbp }
+  );
+
+  try {
+    await Notification.create({
+      recipient: booking.user,
+      type: "general",
+      title: "Refund processed",
+      message: `A refund of £${amountGbp.toFixed(
+        2
+      )} has been processed for your booking.`,
+      sentBy: req.user._id,
+      metadata: { bookingId: booking._id },
+    });
+    notifyUser(booking.user.toString(), {
+      title: "Refund processed",
+      body: `A refund of £${amountGbp.toFixed(
+        2
+      )} has been processed for your booking.`,
+      data: { type: "booking_refunded", bookingId: booking._id.toString() },
+    });
+  } catch (e) {
+    /* notifications best effort */
+  }
+
+  const populated = await Booking.findById(booking._id).populate(
+    bookingPopulate
+  );
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Refund processed successfully",
+    data: { booking: populated, refund: booking.refund },
   });
 });
