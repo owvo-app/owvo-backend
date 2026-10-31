@@ -2012,6 +2012,82 @@ export const sendProviderMessage = catchAsync(async (req, res) => {
   });
 });
 
+// PATCH /admin/providers/:id/profile — admin provider ki basic profile edit
+// karta hai (name, phone, service area, home address). Email jaan kar edit
+// nahi hota — wo login identity hai.
+export const updateAdminProviderProfile = catchAsync(async (req, res) => {
+  const provider = await findProviderForPanel(req.params.id);
+
+  if (req.body?.name !== undefined) {
+    const name = String(req.body.name).trim();
+    if (!name) {
+      throw new AppError(httpStatus.BAD_REQUEST, "Provider name is required");
+    }
+    provider.name = name;
+  }
+  if (req.body?.phoneNumber !== undefined) {
+    const phoneNumber = String(req.body.phoneNumber).trim();
+    if (!phoneNumber) {
+      throw new AppError(httpStatus.BAD_REQUEST, "Phone number is required");
+    }
+    if (phoneNumber !== provider.phoneNumber) {
+      const duplicate = await User.findOne({
+        phoneNumber,
+        _id: { $ne: provider._id },
+      });
+      if (duplicate) {
+        throw new AppError(
+          httpStatus.CONFLICT,
+          "An account with this phone number already exists"
+        );
+      }
+      provider.phoneNumber = phoneNumber;
+    }
+  }
+  if (req.body?.serviceArea !== undefined) {
+    provider.serviceArea = String(req.body.serviceArea).trim();
+  }
+  const address = req.body?.providerAddress;
+  if (address && typeof address === "object") {
+    provider.providerAddress = {
+      streetAddress: String(
+        address.streetAddress ?? provider.providerAddress?.streetAddress ?? ""
+      ).trim(),
+      city: String(address.city ?? provider.providerAddress?.city ?? "").trim(),
+      country: String(
+        address.country ?? provider.providerAddress?.country ?? ""
+      ).trim(),
+      postcode: String(
+        address.postcode ?? provider.providerAddress?.postcode ?? ""
+      ).trim(),
+    };
+  }
+
+  await provider.save();
+  await recordActivity({
+    req,
+    action: "provider.profile_updated",
+    entityType: "user",
+    entityId: provider._id,
+    metadata: {},
+  });
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Provider updated successfully",
+    data: {
+      _id: provider._id,
+      name: provider.name,
+      email: provider.email,
+      phoneNumber: provider.phoneNumber,
+      serviceArea: provider.serviceArea,
+      providerAddress: provider.providerAddress,
+      updatedAt: provider.updatedAt,
+    },
+  });
+});
+
 export const getAdminServicesPricing = catchAsync(async (req, res) => {
   const [catalogServices, settings] = await Promise.all([
     ensureDefaultServices(),

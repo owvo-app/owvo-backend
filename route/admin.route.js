@@ -81,6 +81,7 @@ import {
   addProviderNote,
   deleteProviderNote,
   sendProviderMessage,
+  updateAdminProviderProfile,
   updateProviderVerification,
   updateStaffAccount,
   updateUserAccountStatus,
@@ -262,6 +263,7 @@ router.get("/providers/:id/notes", protect, hasDashboardMenu("washers"), getProv
 router.post("/providers/:id/notes", protect, hasDashboardMenu("washers"), addProviderNote);
 router.delete("/providers/:id/notes/:noteId", protect, hasDashboardMenu("washers"), deleteProviderNote);
 router.post("/providers/:id/message", protect, hasDashboardMenu("washers"), sendProviderMessage);
+router.patch("/providers/:id/profile", protect, hasDashboardMenu("washers"), updateAdminProviderProfile);
 router.post(
   "/providers/:id/send-verification-reminder",
   protect,
