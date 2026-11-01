@@ -13,12 +13,15 @@ import { Booking } from "../model/booking.model.js";
 import {
   applyCommissionSnapshot,
   applyEarningReversal,
+  bookingNetAmount,
   computeProviderBalances,
+  getCurrentCommissionRate,
   getUnpaidBookingEarnings,
   syncBookingRefundSummary,
 } from "../utils/money.util.js";
 import { attemptPayoutTransfer } from "../utils/payout.util.js";
 import { Refund } from "../model/refund.model.js";
+import { EarningAdjustment } from "../model/earningAdjustment.model.js";
 import { Wallet } from "../model/wallet.model.js";
 import { WalletTransaction } from "../model/walletTransaction.model.js";
 import { TransactionNote } from "../model/transactionNote.model.js";
@@ -4225,72 +4228,353 @@ export const getAdminPayments = catchAsync(async (req, res) => {
   });
 });
 
-export const getAdminEarnings = catchAsync(async (req, res) => {
-  const now = new Date();
-  const todayStart = startOfDay(now);
-  const weekStart = startOfWeek(now);
-  const monthStart = startOfMonth(now);
+// ─── Earnings v2 helpers ────────────────────────────────────────
+// Har number snapshot par mabni hai (money.util ke usool) — rate
+// badalne se purani kamai kabhi nahi badalti.
+const EARN_LONDON_FMT = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Europe/London",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+const earnDayKey = (date) => EARN_LONDON_FMT.format(new Date(date));
+const earnWeekKey = (date) => {
+  const [y, m, d] = earnDayKey(date).split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  const dow = (dt.getUTCDay() + 6) % 7;
+  dt.setUTCDate(dt.getUTCDate() - dow);
+  return dt.toISOString().slice(0, 10);
+};
+const earnMonthKey = (date) => earnDayKey(date).slice(0, 7);
+const earnBucketLabel = (key, granularity) => {
+  if (granularity === "monthly") {
+    const [y, m] = key.split("-").map(Number);
+    return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString("en-GB", {
+      month: "short",
+      year: "numeric",
+      timeZone: "UTC",
+    });
+  }
+  const [y, m, d] = key.split("-").map(Number);
+  const label = new Date(Date.UTC(y, m - 1, d)).toLocaleDateString("en-GB", {
+    day: "2-digit",
+    month: "short",
+    timeZone: "UTC",
+  });
+  return granularity === "weekly" ? `W/c ${label}` : label;
+};
+
+// Range ki completed bookings ki earning entries — tip, payout
+// coverage, hold aur refund reversal ke sath. List aur CSV export
+// dono yahi istemal karte hain taake hisaab ek hi rahe.
+const buildEarningEntries = async (query = {}) => {
+  const rangeFilter = dateFilter("completedAt", query);
+  const bookings = await Booking.find({ status: "completed", ...rangeFilter })
+    .populate("user", "_id name email")
+    .populate("provider", "_id name email")
+    .populate("service", "_id title serviceType")
+    .sort({ completedAt: -1, updatedAt: -1 })
+    .limit(5000)
+    .lean();
   const settings = await getPlatformSettingsDoc();
   const commissionRate = Number(settings.commissionRate) || 0.25;
-  const completedRangeFilter = dateFilter("completedAt", req.query);
+  const bookingIds = bookings.map((booking) => booking._id);
 
-  const [bookings, paidPayoutsAgg] = await Promise.all([
-    Booking.find({ status: "completed", ...completedRangeFilter })
-      .populate("user", "_id name email")
-      .populate("provider", "_id name email")
-      .populate("service", "_id title serviceType")
-      .sort({ completedAt: -1, updatedAt: -1 })
-      .limit(300)
+  const [tipsAgg, payouts, refunds, openDisputes] = await Promise.all([
+    bookingIds.length
+      ? paymentInfo.aggregate([
+          {
+            $match: {
+              bookingId: { $in: bookingIds },
+              type: "tips",
+              paymentStatus: "complete",
+            },
+          },
+          { $group: { _id: "$bookingId", total: { $sum: "$price" } } },
+        ])
+      : [],
+    Payout.find({
+      source: { $ne: "bonus" },
+      status: { $in: ["paid", "processing", "pending"] },
+    })
+      .select("bookingIds status")
       .lean(),
-    Payout.aggregate([
-      { $match: { status: "paid", ...dateFilter("createdAt", req.query) } },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
-    ]),
+    Refund.find({ status: "refunded" })
+      .select("booking earningReversal")
+      .lean(),
+    SupportTicket.find({
+      type: "dispute",
+      status: { $in: ["open", "in_progress"] },
+      booking: { $ne: null },
+    })
+      .select("booking")
+      .lean(),
   ]);
 
+  const tipByBooking = new Map(
+    tipsAgg.map((row) => [row._id.toString(), asMoney(row.total)])
+  );
+  const coverageRank = { pending: 1, processing: 2, paid: 3 };
+  const coverage = new Map();
+  for (const payout of payouts) {
+    for (const id of payout.bookingIds || []) {
+      const key = id.toString();
+      if ((coverageRank[payout.status] || 0) > (coverageRank[coverage.get(key)] || 0)) {
+        coverage.set(key, payout.status);
+      }
+    }
+  }
+  const reversalByBooking = new Map();
+  for (const refund of refunds) {
+    const key = refund.booking?.toString();
+    if (key) {
+      reversalByBooking.set(
+        key,
+        asMoney(
+          (reversalByBooking.get(key) || 0) +
+            asMoney(refund.earningReversal?.amount || 0)
+        )
+      );
+    }
+  }
+  const disputedBookings = new Set(
+    openDisputes.map((ticket) => ticket.booking?.toString()).filter(Boolean)
+  );
+
   const entries = bookings.map((booking) => {
-    const grossAmount = asMoney(booking.finalPrice);
-    // Snapshot ho to wohi rate jo booking complete hone par laga tha.
+    const grossAmount = asMoney(booking.finalPrice || booking.price || 0);
     const hasSnapshot =
       booking.providerNetAmount !== null &&
       booking.providerNetAmount !== undefined;
-    const commissionAmount = hasSnapshot
+    const entryCommission = hasSnapshot
       ? asMoney(booking.commissionAmount)
       : asMoney(grossAmount * commissionRate);
     const netAmount = hasSnapshot
       ? asMoney(booking.providerNetAmount)
-      : asMoney(grossAmount - commissionAmount);
+      : asMoney(grossAmount - entryCommission);
+    const key = booking._id.toString();
+    const tip = tipByBooking.get(key) || 0;
+    const reversalAmount = reversalByBooking.get(key) || 0;
+    const manualHold = booking.earningHold?.active ? booking.earningHold : null;
+    const disputeHeld = disputedBookings.has(key);
+
+    // Status ki tartib: refund sab se pehle, phir hold, phir payout.
+    let status = "Available";
+    if (reversalAmount > 0 || booking.refund?.status === "refunded") {
+      status = "Refunded";
+    } else if (disputeHeld || manualHold) {
+      status = "On Hold";
+    } else if (coverage.get(key) === "paid") {
+      status = "Paid Out";
+    } else if (coverage.get(key)) {
+      status = "Processing";
+    }
 
     return {
       bookingId: booking._id,
+      displayId: `#${key.slice(-6).toUpperCase()}`,
       date: booking.completedAt || booking.updatedAt,
       customer: booking.user,
       provider: booking.provider,
       service: booking.service,
       grossAmount,
       commissionRate: hasSnapshot ? booking.commissionRate : commissionRate,
-      commissionAmount,
+      hasSnapshot,
+      commissionAmount: entryCommission,
       netAmount,
+      tip,
+      reversalAmount,
+      totalToProvider: asMoney(Math.max(netAmount - reversalAmount, 0) + tip),
       currency: booking.currency || "GBP",
-      status: "available",
+      status,
+      hold: manualHold
+        ? {
+            source: "manual",
+            amount: manualHold.amount,
+            reason: manualHold.reason || "",
+            at: manualHold.at,
+          }
+        : disputeHeld
+          ? { source: "dispute", amount: netAmount, reason: "Open dispute" }
+          : null,
     };
   });
 
-  const sumEntries = (predicate) =>
-    entries
-      .filter(predicate)
-      .reduce(
-        (totals, entry) => ({
-          grossAmount: asMoney(totals.grossAmount + entry.grossAmount),
-          commissionAmount: asMoney(totals.commissionAmount + entry.commissionAmount),
-          netAmount: asMoney(totals.netAmount + entry.netAmount),
-        }),
-        { grossAmount: 0, commissionAmount: 0, netAmount: 0 }
-      );
+  return { entries, commissionRate };
+};
 
-  const totalNet = entries.reduce((sum, entry) => sum + entry.netAmount, 0);
-  const totalCommission = entries.reduce((sum, entry) => sum + entry.commissionAmount, 0);
-  const paidOut = asMoney(paidPayoutsAgg[0]?.total);
+const earnFilterEntries = (entries, query = {}) => {
+  const search = (query.search || "").toString().trim().toLowerCase();
+  const providerId = (query.providerId || "").toString();
+  let filtered = entries;
+  if (providerId) {
+    filtered = filtered.filter(
+      (entry) => entry.provider?._id?.toString() === providerId
+    );
+  }
+  if (search) {
+    filtered = filtered.filter((entry) =>
+      [
+        entry.customer?.name,
+        entry.customer?.email,
+        entry.provider?.name,
+        entry.provider?.email,
+        entry.displayId,
+        entry.bookingId?.toString(),
+      ].some((value) => (value || "").toLowerCase().includes(search))
+    );
+  }
+  return filtered;
+};
+
+export const getAdminEarnings = catchAsync(async (req, res) => {
+  const now = new Date();
+  const todayStart = startOfDay(now);
+  const weekStart = startOfWeek(now);
+  const monthStart = startOfMonth(now);
+  const { entries, commissionRate } = await buildEarningEntries(req.query);
+  const filtered = earnFilterEntries(entries, req.query);
+
+  const sumOf = (list, field) =>
+    asMoney(list.reduce((sum, entry) => sum + (entry[field] || 0), 0));
+  const rangeTotals = {
+    gross: sumOf(filtered, "grossAmount"),
+    commission: sumOf(filtered, "commissionAmount"),
+    providerNet: sumOf(filtered, "netAmount"),
+    tips: sumOf(filtered, "tip"),
+    jobs: filtered.length,
+  };
+
+  // Refunds (ledger) aur paid payouts — range ke andar.
+  const from = req.query.from ? new Date(req.query.from) : null;
+  const to = req.query.to ? new Date(req.query.to) : null;
+  const inRange = (value) => {
+    if (!value) return false;
+    const time = new Date(value).getTime();
+    if (from && time < from.getTime()) return false;
+    if (to && time > to.getTime()) return false;
+    return true;
+  };
+  const [refundedRows, paidPayoutRows] = await Promise.all([
+    Refund.find({ status: "refunded" })
+      .select("amount refundedAt createdAt")
+      .lean(),
+    Payout.find({ status: "paid", source: { $ne: "bonus" } })
+      .select("amount paidAt updatedAt createdAt")
+      .lean(),
+  ]);
+  const rangeRefunds = refundedRows.filter((row) =>
+    inRange(row.refundedAt || row.createdAt)
+  );
+  const refundsTotal = asMoney(
+    rangeRefunds.reduce((sum, row) => sum + asMoney(row.amount), 0)
+  );
+  const paidOut = asMoney(
+    paidPayoutRows
+      .filter((row) => inRange(row.paidAt || row.updatedAt || row.createdAt))
+      .reduce((sum, row) => sum + asMoney(row.amount), 0)
+  );
+
+  // Rozana / haftawar / mahana series (Europe/London din).
+  const granularity = ["daily", "weekly", "monthly"].includes(
+    req.query.granularity
+  )
+    ? req.query.granularity
+    : "daily";
+  const bucketOf =
+    granularity === "weekly"
+      ? earnWeekKey
+      : granularity === "monthly"
+        ? earnMonthKey
+        : earnDayKey;
+  const buckets = new Map();
+  const bucketFor = (date) => {
+    const key = bucketOf(date);
+    if (!buckets.has(key)) {
+      buckets.set(key, { key, gross: 0, commission: 0, refunds: 0 });
+    }
+    return buckets.get(key);
+  };
+  for (const entry of filtered) {
+    const bucket = bucketFor(entry.date);
+    bucket.gross = asMoney(bucket.gross + entry.grossAmount);
+    bucket.commission = asMoney(bucket.commission + entry.commissionAmount);
+  }
+  for (const row of rangeRefunds) {
+    const bucket = bucketFor(row.refundedAt || row.createdAt);
+    bucket.refunds = asMoney(bucket.refunds + asMoney(row.amount));
+  }
+  const series = [...buckets.values()]
+    .sort((a, b) => (a.key < b.key ? -1 : 1))
+    .map((bucket) => ({
+      ...bucket,
+      label: earnBucketLabel(bucket.key, granularity),
+    }));
+
+  // Per-provider rollup: range ke hisaab + kul available (all-time).
+  const byProvider = new Map();
+  for (const entry of filtered) {
+    const pid = entry.provider?._id?.toString();
+    if (!pid) continue;
+    if (!byProvider.has(pid)) {
+      byProvider.set(pid, {
+        provider: entry.provider,
+        jobs: 0,
+        gross: 0,
+        commission: 0,
+        net: 0,
+        tips: 0,
+      });
+    }
+    const row = byProvider.get(pid);
+    row.jobs += 1;
+    row.gross = asMoney(row.gross + entry.grossAmount);
+    row.commission = asMoney(row.commission + entry.commissionAmount);
+    row.net = asMoney(row.net + entry.netAmount);
+    row.tips = asMoney(row.tips + entry.tip);
+  }
+  const providers = await Promise.all(
+    [...byProvider.values()].map(async (row) => {
+      const balances = await computeProviderBalances(
+        row.provider._id.toString()
+      );
+      return {
+        ...row,
+        paidOut: balances.paidOut,
+        heldAmount: balances.heldAmount,
+        manualAdjustments: balances.manualAdjustments,
+        available: balances.available,
+      };
+    })
+  );
+  providers.sort((a, b) => b.gross - a.gross);
+
+  // Pending payouts = is waqt kul payable (range se bahar, asal halat).
+  const allProviderIds = await Booking.distinct("provider", {
+    status: "completed",
+  });
+  let pendingPayouts = 0;
+  await Promise.all(
+    allProviderIds.map(async (pid) => {
+      const balances = await computeProviderBalances(pid.toString());
+      pendingPayouts = asMoney(pendingPayouts + balances.available);
+    })
+  );
+
+  const sumEntries = (predicate) => {
+    const list = entries.filter(predicate);
+    return {
+      grossAmount: sumOf(list, "grossAmount"),
+      commissionAmount: sumOf(list, "commissionAmount"),
+      netAmount: sumOf(list, "netAmount"),
+    };
+  };
+  const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+  const limit = Math.min(
+    Math.max(parseInt(req.query.limit, 10) || 20, 1),
+    100
+  );
+  const total = filtered.length;
 
   sendResponse(res, {
     statusCode: httpStatus.OK,
@@ -4302,12 +4586,41 @@ export const getAdminEarnings = catchAsync(async (req, res) => {
         today: sumEntries((entry) => new Date(entry.date) >= todayStart),
         week: sumEntries((entry) => new Date(entry.date) >= weekStart),
         month: sumEntries((entry) => new Date(entry.date) >= monthStart),
-        period: sumEntries(() => true),
-        netProfit: asMoney(totalCommission),
-        pendingNet: asMoney(Math.max(totalNet - paidOut, 0)),
+        period: {
+          grossAmount: rangeTotals.gross,
+          commissionAmount: rangeTotals.commission,
+          netAmount: rangeTotals.providerNet,
+        },
+        netProfit: rangeTotals.commission,
+        pendingNet: asMoney(
+          Math.max(rangeTotals.providerNet - paidOut, 0)
+        ),
         paidOut,
+        range: {
+          gross: rangeTotals.gross,
+          commission: rangeTotals.commission,
+          providerNet: rangeTotals.providerNet,
+          tips: rangeTotals.tips,
+          jobs: rangeTotals.jobs,
+          refunds: refundsTotal,
+          refundsCount: rangeRefunds.length,
+          paidOut,
+          effectiveRate:
+            rangeTotals.gross > 0
+              ? asMoney((rangeTotals.commission / rangeTotals.gross) * 100)
+              : 0,
+        },
+        pendingPayouts,
       },
-      entries,
+      series,
+      providers,
+      entries: filtered.slice((page - 1) * limit, page * limit),
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.max(Math.ceil(total / limit), 1),
+      },
     },
   });
 });
@@ -7093,5 +7406,268 @@ export const getAdminReconciliation = catchAsync(async (req, res) => {
     success: true,
     message: "Reconciliation fetched",
     data: { issues, counts, stripeBalance, stripeError, checkedAt: new Date() },
+  });
+});
+
+export const exportAdminEarningsCsv = catchAsync(async (req, res) => {
+  const { entries } = await buildEarningEntries(req.query);
+  const filtered = earnFilterEntries(entries, req.query).slice(0, 5000);
+  const header = [
+    "Booking ID",
+    "Date",
+    "Customer",
+    "Customer Email",
+    "Provider",
+    "Provider Email",
+    "Service",
+    "Gross",
+    "Commission %",
+    "Commission",
+    "Net",
+    "Tip",
+    "Reversal",
+    "Total to Provider",
+    "Status",
+  ];
+  const lines = [header.map(bkCsvCell).join(",")];
+  for (const entry of filtered) {
+    lines.push(
+      [
+        entry.displayId,
+        entry.date ? new Date(entry.date).toISOString() : "",
+        entry.customer?.name || "",
+        entry.customer?.email || "",
+        entry.provider?.name || "",
+        entry.provider?.email || "",
+        entry.service?.title || entry.service?.serviceType || "",
+        entry.grossAmount,
+        entry.hasSnapshot
+          ? Math.round((entry.commissionRate || 0) * 100)
+          : "current",
+        entry.commissionAmount,
+        entry.netAmount,
+        entry.tip,
+        entry.reversalAmount,
+        entry.totalToProvider,
+        entry.status,
+      ]
+        .map(bkCsvCell)
+        .join(",")
+    );
+  }
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader(
+    "Content-Disposition",
+    'attachment; filename="owvo-earnings.csv"'
+  );
+  return res.status(httpStatus.OK).send(lines.join("\n"));
+});
+
+// ─── Earnings adjustments (manual bonus / deduction) ────────────
+export const getEarningAdjustments = catchAsync(async (req, res) => {
+  const filter = {};
+  if (req.query.providerId) filter.provider = req.query.providerId;
+  const rows = await EarningAdjustment.find(filter)
+    .populate("provider", "_id name email")
+    .populate("booking", "_id")
+    .populate("createdBy", "_id name email")
+    .sort({ createdAt: -1 })
+    .limit(500)
+    .lean();
+  const search = (req.query.search || "").toString().trim().toLowerCase();
+  const adjustments = search
+    ? rows.filter((row) =>
+        [row.provider?.name, row.provider?.email, row.reason].some((value) =>
+          (value || "").toLowerCase().includes(search)
+        )
+      )
+    : rows;
+  const total = adjustments.reduce(
+    (sum, row) =>
+      asMoney(
+        sum + (row.type === "deduction" ? -asMoney(row.amount) : asMoney(row.amount))
+      ),
+    0
+  );
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Earning adjustments fetched",
+    data: { adjustments, total },
+  });
+});
+
+export const createEarningAdjustment = catchAsync(async (req, res) => {
+  const { providerId, bookingId, type, amount, reason } = req.body || {};
+  if (!mongoose.Types.ObjectId.isValid(providerId || "")) {
+    throw new AppError(httpStatus.BAD_REQUEST, "Valid providerId is required");
+  }
+  if (!["bonus", "deduction"].includes(type)) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "Adjustment type must be bonus or deduction"
+    );
+  }
+  const value = asMoney(amount);
+  if (!value || value <= 0) {
+    throw new AppError(httpStatus.BAD_REQUEST, "Amount must be greater than 0");
+  }
+  if (!reason || !reason.toString().trim()) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "A reason is required for an adjustment"
+    );
+  }
+  const provider = await User.findById(providerId);
+  if (!provider || provider.role !== "provider") {
+    throw new AppError(httpStatus.NOT_FOUND, "Provider not found");
+  }
+  let booking = null;
+  if (bookingId) {
+    if (!mongoose.Types.ObjectId.isValid(bookingId)) {
+      throw new AppError(httpStatus.BAD_REQUEST, "Invalid bookingId");
+    }
+    booking = await Booking.findById(bookingId);
+    if (!booking || booking.provider?.toString() !== providerId) {
+      throw new AppError(
+        httpStatus.BAD_REQUEST,
+        "Booking does not belong to this provider"
+      );
+    }
+  }
+  const adjustment = await EarningAdjustment.create({
+    provider: providerId,
+    booking: booking ? booking._id : null,
+    type,
+    amount: value,
+    reason: reason.toString().trim(),
+    createdBy: req.user._id,
+  });
+  await recordActivity({
+    req,
+    action: "earnings.adjustment_created",
+    entityType: "earningAdjustment",
+    entityId: adjustment._id,
+    metadata: { providerId, type, amount: value },
+  });
+  notifyUser(providerId.toString(), {
+    title: "Earnings adjustment",
+    body:
+      type === "bonus"
+        ? `A bonus of £${value.toFixed(2)} has been added to your earnings.`
+        : `A deduction of £${value.toFixed(2)} has been applied to your earnings.`,
+    data: { type: "earning_adjustment" },
+  });
+  const data = await EarningAdjustment.findById(adjustment._id)
+    .populate("provider", "_id name email")
+    .populate("createdBy", "_id name email")
+    .lean();
+  sendResponse(res, {
+    statusCode: httpStatus.CREATED,
+    success: true,
+    message: "Adjustment added",
+    data,
+  });
+});
+
+// ─── Manual earning hold / release ──────────────────────────────
+export const holdBookingEarning = catchAsync(async (req, res) => {
+  const booking = await Booking.findById(req.params.id);
+  if (!booking) {
+    throw new AppError(httpStatus.NOT_FOUND, "Booking not found");
+  }
+  if (booking.status !== "completed") {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "Only a completed booking has earnings to hold"
+    );
+  }
+  const { amount, reason } = req.body || {};
+  if (!reason || !reason.toString().trim()) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "A reason is required to hold earnings"
+    );
+  }
+  if (booking.earningHold?.active) {
+    throw new AppError(
+      httpStatus.CONFLICT,
+      "This booking's earnings are already on hold"
+    );
+  }
+  const rate = await getCurrentCommissionRate();
+  const net = bookingNetAmount(booking, rate);
+  const requested = amount ? asMoney(amount) : net;
+  const holdAmount = Math.min(requested, net);
+  if (!holdAmount || holdAmount <= 0) {
+    throw new AppError(httpStatus.BAD_REQUEST, "Nothing available to hold");
+  }
+  booking.earningHold = {
+    active: true,
+    amount: holdAmount,
+    reason: reason.toString().trim(),
+    by: req.user._id,
+    at: new Date(),
+    releasedAt: null,
+    releasedBy: null,
+  };
+  await booking.save();
+  await recordActivity({
+    req,
+    action: "earnings.hold_placed",
+    entityType: "booking",
+    entityId: booking._id,
+    metadata: { amount: holdAmount, reason: booking.earningHold.reason },
+  });
+  if (booking.provider) {
+    notifyUser(booking.provider.toString(), {
+      title: "Earnings on hold",
+      body: `£${holdAmount.toFixed(2)} of your earnings has been placed on hold.`,
+      data: { type: "earning_hold", bookingId: booking._id.toString() },
+    });
+  }
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Earnings placed on hold",
+    data: { bookingId: booking._id, earningHold: booking.earningHold },
+  });
+});
+
+export const releaseBookingEarning = catchAsync(async (req, res) => {
+  const booking = await Booking.findById(req.params.id);
+  if (!booking) {
+    throw new AppError(httpStatus.NOT_FOUND, "Booking not found");
+  }
+  if (!booking.earningHold?.active) {
+    throw new AppError(
+      httpStatus.CONFLICT,
+      "This booking's earnings are not on hold"
+    );
+  }
+  const heldAmount = asMoney(booking.earningHold.amount || 0);
+  booking.earningHold.active = false;
+  booking.earningHold.releasedAt = new Date();
+  booking.earningHold.releasedBy = req.user._id;
+  await booking.save();
+  await recordActivity({
+    req,
+    action: "earnings.hold_released",
+    entityType: "booking",
+    entityId: booking._id,
+    metadata: { amount: heldAmount },
+  });
+  if (booking.provider) {
+    notifyUser(booking.provider.toString(), {
+      title: "Earnings released",
+      body: `£${heldAmount.toFixed(2)} of held earnings has been released.`,
+      data: { type: "earning_hold_released", bookingId: booking._id.toString() },
+    });
+  }
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Earnings hold released",
+    data: { bookingId: booking._id, earningHold: booking.earningHold },
   });
 });

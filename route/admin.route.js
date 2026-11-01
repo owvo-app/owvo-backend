@@ -48,6 +48,11 @@ import {
   sendAdminBookingNotification,
   createAdminBooking,
   getAdminEarnings,
+  exportAdminEarningsCsv,
+  getEarningAdjustments,
+  createEarningAdjustment,
+  holdBookingEarning,
+  releaseBookingEarning,
   getAdminMe,
   getAdminNotifications,
   getAdminPayments,
@@ -188,6 +193,11 @@ router.delete("/addons/:addonId", protect, isAdmin, deleteAdminAddon);
 
 router.get("/payments", protect, hasDashboardMenu("payouts-payments"), getAdminPayments);
 router.get("/earnings", protect, hasDashboardMenu("earnings"), getAdminEarnings);
+router.get("/earnings/export", protect, hasDashboardMenu("earnings"), exportAdminEarningsCsv);
+router.get("/earnings/adjustments", protect, hasDashboardMenu("earnings"), getEarningAdjustments);
+router.post("/earnings/adjustments", protect, isAdmin, createEarningAdjustment);
+router.post("/bookings/:id/hold-earnings", protect, isAdmin, holdBookingEarning);
+router.post("/bookings/:id/release-hold", protect, isAdmin, releaseBookingEarning);
 router.get("/payouts", protect, hasDashboardMenu("payouts-payments"), getAdminPayouts);
 router.post("/payouts", protect, isAdmin, createAdminPayout);
 router.patch("/payouts/:payoutId/status", protect, isAdmin, updateAdminPayoutStatus);

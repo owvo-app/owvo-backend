@@ -162,6 +162,25 @@ const bookingSchema = new mongoose.Schema(
         default: null,
       },
     },
+    // Admin ka manual earning hold (Earnings phase) — is booking ki
+    // kamai Available se nikaal kar "On Hold" rakhta hai.
+    earningHold: {
+      active: { type: Boolean, default: false },
+      amount: { type: Number, default: 0 },
+      reason: { type: String, trim: true, default: "" },
+      by: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        default: null,
+      },
+      at: { type: Date, default: null },
+      releasedAt: { type: Date, default: null },
+      releasedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        default: null,
+      },
+    },
     // Commission snapshot (Payments phase) — booking complete hone
     // par us lamhe ka rate hamesha ke liye; null = abhi snapshot nahi.
     commissionRate: { type: Number, default: null },

@@ -4,6 +4,7 @@ import { Payout } from "../model/payout.model.js";
 import { paymentInfo } from "../model/payment.model.js";
 import { PlatformSetting } from "../model/platformSetting.model.js";
 import { Refund } from "../model/refund.model.js";
+import { EarningAdjustment } from "../model/earningAdjustment.model.js";
 import { SupportTicket } from "../model/supportTicket.model.js";
 
 // ─── OWVO money helpers (Payments phase) ─────────────────────────────
@@ -86,11 +87,18 @@ export const computeProviderBalances = async (providerId) => {
   const rate = await getCurrentCommissionRate();
   const providerObjectId = new mongoose.Types.ObjectId(providerId);
 
-  const [bookings, tips, refunds, paidAgg, allocatedAgg, openDisputes] =
-    await Promise.all([
+  const [
+    bookings,
+    tips,
+    refunds,
+    paidAgg,
+    allocatedAgg,
+    openDisputes,
+    manualAdjustmentRows,
+  ] = await Promise.all([
       Booking.find({ provider: providerObjectId, status: "completed" })
         .select(
-          "_id finalPrice price commissionRate commissionAmount providerNetAmount completedAt"
+          "_id finalPrice price commissionRate commissionAmount providerNetAmount completedAt earningHold"
         )
         .lean(),
       getProviderTipsTotal(providerId),
@@ -128,7 +136,19 @@ export const computeProviderBalances = async (providerId) => {
       })
         .select("booking")
         .lean(),
+      EarningAdjustment.find({ provider: providerObjectId })
+        .select("type amount")
+        .lean(),
     ]);
+
+  // Manual adjustments (bonus +, deduction −) — admin ki taraf se.
+  let manualAdjustments = 0;
+  for (const adj of manualAdjustmentRows) {
+    manualAdjustments = asMoney(
+      manualAdjustments +
+        (adj.type === "deduction" ? -asMoney(adj.amount) : asMoney(adj.amount))
+    );
+  }
 
   const reversedByBooking = new Map();
   let adjustments = 0;
@@ -169,13 +189,32 @@ export const computeProviderBalances = async (providerId) => {
     if (disputedBookingIds.has(booking._id.toString()) && effectiveNet > 0) {
       heldAmount = asMoney(heldAmount + effectiveNet);
       heldBookingIds.push(booking._id);
+    } else if (booking.earningHold?.active && effectiveNet > 0) {
+      // Admin ka manual hold — mukammal net ya di gayi raqam, jo kam ho.
+      const holdAmount = Math.min(
+        asMoney(booking.earningHold.amount || effectiveNet),
+        effectiveNet
+      );
+      if (holdAmount > 0) {
+        heldAmount = asMoney(heldAmount + holdAmount);
+        heldBookingIds.push(booking._id);
+      }
     }
   }
 
   const paidOut = asMoney(paidAgg[0]?.total || 0);
   const allocated = asMoney(allocatedAgg[0]?.total || 0);
   const available = asMoney(
-    Math.max(net + tips - heldAmount - paidOut - allocated - adjustments, 0)
+    Math.max(
+      net +
+        tips +
+        manualAdjustments -
+        heldAmount -
+        paidOut -
+        allocated -
+        adjustments,
+      0
+    )
   );
 
   return {
@@ -189,6 +228,7 @@ export const computeProviderBalances = async (providerId) => {
     paidOut,
     allocated,
     adjustments,
+    manualAdjustments,
     available,
     jobsCompleted: bookings.length,
   };
@@ -270,7 +310,7 @@ export const getUnpaidBookingEarnings = async (providerId) => {
   const providerObjectId = new mongoose.Types.ObjectId(providerId);
   const [bookings, payouts, refunds, openDisputes] = await Promise.all([
     Booking.find({ provider: providerObjectId, status: "completed" })
-      .select("_id finalPrice price providerNetAmount completedAt")
+      .select("_id finalPrice price providerNetAmount completedAt earningHold")
       .sort({ completedAt: 1 })
       .lean(),
     Payout.find({
@@ -326,7 +366,9 @@ export const getUnpaidBookingEarnings = async (providerId) => {
         bookingId: booking._id,
         gross: asMoney(booking.finalPrice || booking.price || 0),
         net: asMoney(Math.max(net - reversed, 0)),
-        held: disputed.has(booking._id.toString()),
+        held:
+          disputed.has(booking._id.toString()) ||
+          !!booking.earningHold?.active,
         completedAt: booking.completedAt,
       };
     })
