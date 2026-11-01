@@ -426,7 +426,7 @@ export const createPayment = async (req, res) => {
 
   try {
     const booking = await Booking.findById(bookingId).select(
-      "user provider price finalPrice currency payment status"
+      "user provider price finalPrice currency payment status bookingType"
     );
 
     if (!booking) {
@@ -439,6 +439,20 @@ export const createPayment = async (req, res) => {
 
     if (paymentType === "booking" && booking.payment?.status === "paid") {
       return sendFailure(res, 409, "Booking is already paid.");
+    }
+
+    // Book for Later: payment sirf tab jab provider accept kar
+    // chuka ho — us se pehle paisa lena hi nahi hai.
+    if (
+      paymentType === "booking" &&
+      booking.bookingType === "later" &&
+      booking.status !== "accepted"
+    ) {
+      return sendFailure(
+        res,
+        400,
+        "The provider has not accepted this booking yet."
+      );
     }
 
     const amountToCharge =

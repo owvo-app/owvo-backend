@@ -6,6 +6,7 @@ import {
   declineBooking,
   requestCashOut,
   getConnectStatus,
+  getWasherSlots,
   createConnectOnboarding,
   saveBookingForLater,
   unsaveBookingForLater,
@@ -112,6 +113,7 @@ router.get("/income/today", protect, getDayIncomeProvider);
  *   washerId (optional) - filter by specific provider (admin only)
  *   userId (optional)   - filter by specific customer
  */
+router.get("/:id/slots", protect, getWasherSlots);
 router.get("/income/weekly", protect, getWeeklyIncomeProvider);
 
 /**

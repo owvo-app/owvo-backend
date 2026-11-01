@@ -25,6 +25,12 @@ import { broadcast, emitToUser } from "../socket/socket.js";
 import { recordActivity } from "../utils/activityLog.util.js";
 import { notifyUser } from "../utils/fcm.util.js";
 import {
+  applyLaterAcceptance,
+  computeSlotsForDate,
+  isWithinScheduleLondon,
+  refundLaterBookingInFull,
+} from "../utils/laterBooking.util.js";
+import {
   isProviderAvailableNow,
   normalizeAvailability,
 } from "../utils/availability.util.js";
@@ -600,6 +606,20 @@ export const acceptBooking = catchAsync(async (req, res) => {
     booking.washEndsAt = new Date(booking.arrivedAt.getTime() + 30 * 60 * 1000);
   }
   await booking.save();
+
+  // Book for Later: accept par payment deadline + customer ko Pay
+  // Now ki اطلاع; provider cancel kare aur booking paid ho to
+  // mukammal refund khud bakhud.
+  if (booking.bookingType === "later" && status === "accepted") {
+    await applyLaterAcceptance(booking);
+  }
+  if (booking.bookingType === "later" && status === "cancelled") {
+    await refundLaterBookingInFull(booking, {
+      reason: "Provider cancelled a scheduled booking",
+      initiatedBy: "provider",
+      decidedBy: washer._id,
+    });
+  }
 
   recordActivity({
     req,
@@ -1372,10 +1392,13 @@ export const getNearbyWashers = catchAsync(async (req, res) => {
     );
   }
 
+  // Book for Later: mode=later par band/offline providers bhi
+  // aate hain — un ka agla khula din hi asal maloomat hai.
+  const forLater = req.query.mode === "later";
   // Build query — $nearSphere handles the geo-distance filter
   const query = {
     role: "provider",
-    isOnline: true,
+    ...(forLater ? {} : { isOnline: true }),
     "adminVerification.status": "approved",
     "enforcement.status": { $nin: ["suspended", "banned"] },
     "policyAcceptance.safetyGuidelinesAccepted": true,
@@ -1408,7 +1431,7 @@ export const getNearbyWashers = catchAsync(async (req, res) => {
       "catalogKey title price serviceType carSize carName carModel description isActive"
     );
   const availableWashers = washers.filter((washer) =>
-    isProviderAvailableNow(washer)
+    forLater ? true : isProviderAvailableNow(washer)
   );
   await Promise.all(
     availableWashers.map((washer) => refreshProviderBusyState(washer))
@@ -1482,6 +1505,8 @@ export const getNearbyWashers = catchAsync(async (req, res) => {
       photo: washerData.photo,
       isOnline: washerData.isOnline,
       isBusy: washerData.isBusy,
+      availability: washerData.availability || null,
+      openNow: isWithinScheduleLondon(washerData, new Date()),
       dailyWashLimit: washerData.dailyWashLimit,
       location: approximateLocation(washerData.location),
       preferredServices,
@@ -2257,8 +2282,8 @@ export const getConnectStatus = catchAsync(async (req, res) => {
     success: true,
     message: "Connect status fetched",
     data: {
-      connected: !!connect.accountId,
       accountId: connect.accountId || "",
+      connected: !!connect.accountId,
       payoutsEnabled: !!connect.payoutsEnabled,
       onboardingComplete: !!connect.onboardingComplete,
       payoutMode: provider?.payoutMode || "auto",
@@ -2307,5 +2332,32 @@ export const createConnectOnboarding = catchAsync(async (req, res) => {
     success: true,
     message: "Onboarding link created",
     data: { url: link.url, expiresAt: link.expires_at },
+  });
+});
+
+export const getWasherSlots = catchAsync(async (req, res) => {
+  const date = (req.query.date || "").toString();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "date query param is required (YYYY-MM-DD)"
+    );
+  }
+  const washer = await User.findById(req.params.id).select(
+    "role availability"
+  );
+  if (!washer || washer.role !== "provider") {
+    throw new AppError(httpStatus.NOT_FOUND, "Provider not found");
+  }
+  const durationMin = Math.min(
+    Math.max(parseInt(req.query.durationMin, 10) || 60, 15),
+    240
+  );
+  const data = await computeSlotsForDate(washer, date, durationMin);
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Slots fetched",
+    data,
   });
 });

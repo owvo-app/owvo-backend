@@ -181,6 +181,19 @@ const bookingSchema = new mongoose.Schema(
         default: null,
       },
     },
+    // Book for Later — scheduled booking ke fields. "now" purani
+    // tamam bookings ke liye default hai (koi tabdeeli nahi).
+    bookingType: {
+      type: String,
+      enum: ["now", "later"],
+      default: "now",
+      index: true,
+    },
+    scheduledAt: { type: Date, default: null },
+    paymentDeadline: { type: Date, default: null },
+    requestExpiresAt: { type: Date, default: null },
+    reminder1hSent: { type: Boolean, default: false },
+    providerReminderSent: { type: Boolean, default: false },
     // Commission snapshot (Payments phase) — booking complete hone
     // par us lamhe ka rate hamesha ke liye; null = abhi snapshot nahi.
     commissionRate: { type: Number, default: null },

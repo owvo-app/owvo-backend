@@ -13,6 +13,19 @@ import { broadcast, emitToUser } from "../socket/socket.js";
 import { recordActivity } from "../utils/activityLog.util.js";
 import { notifyUser } from "../utils/fcm.util.js";
 import { isProviderAvailableNow } from "../utils/availability.util.js";
+import {
+  LATER_FREE_CANCEL_MIN,
+  LATER_MAX_ADVANCE_DAYS,
+  LATER_MIN_ADVANCE_MIN,
+  LATER_RESPONSE_CUTOFF_MIN,
+  countDayBookings,
+  dailyBookingCap,
+  formatLondonDateTime,
+  hasSlotConflict,
+  isWithinScheduleLondon,
+  refundLaterBookingInFull,
+  serviceDurationMin,
+} from "../utils/laterBooking.util.js";
 import { syncProviderCompletedJobs } from "../utils/completedJobs.util.js";
 import catchAsync from "../utils/catch.Async.js";
 import { refreshProviderBusyState } from "../utils/providerBusy.util.js";
@@ -67,7 +80,10 @@ export const createBooking = catchAsync(async (req, res) => {
     postalCode,
     vehicle,
     vehicleId,
+    bookingType,
   } = req.body;
+
+  const isLater = bookingType === "later";
 
   if (
     !provider ||
@@ -87,24 +103,70 @@ export const createBooking = catchAsync(async (req, res) => {
     throw new AppError(httpStatus.NOT_FOUND, "Washer not found");
   }
 
-  if (!washer.isOnline) {
-    throw new AppError(httpStatus.BAD_REQUEST, "Washer is offline");
-  }
+  // Later booking: provider ka abhi online/busy hona shart NAHI —
+  // sirf tay shuda waqt ka schedule, advance window, rozana hadd
+  // aur slot ka takrao check hota hai.
+  let scheduledDate = null;
+  if (isLater) {
+    scheduledDate = new Date(bookingDate);
+    if (Number.isNaN(scheduledDate.getTime())) {
+      throw new AppError(httpStatus.BAD_REQUEST, "Invalid booking date");
+    }
+    const nowMs = Date.now();
+    if (scheduledDate.getTime() < nowMs + LATER_MIN_ADVANCE_MIN * 60000) {
+      throw new AppError(
+        httpStatus.BAD_REQUEST,
+        "Later bookings must be at least 2 hours ahead"
+      );
+    }
+    if (
+      scheduledDate.getTime() >
+      nowMs + LATER_MAX_ADVANCE_DAYS * 24 * 60 * 60000
+    ) {
+      throw new AppError(
+        httpStatus.BAD_REQUEST,
+        "Later bookings can be made up to 30 days ahead"
+      );
+    }
+    if (!isWithinScheduleLondon(washer, scheduledDate)) {
+      throw new AppError(
+        httpStatus.BAD_REQUEST,
+        "The provider is not available at that time"
+      );
+    }
+    const londonDay = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Europe/London",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(scheduledDate);
+    const dayCount = await countDayBookings(provider, londonDay);
+    if (dayCount >= (await dailyBookingCap(washer))) {
+      throw new AppError(
+        httpStatus.BAD_REQUEST,
+        "This provider is fully booked that day"
+      );
+    }
+  } else {
+    if (!washer.isOnline) {
+      throw new AppError(httpStatus.BAD_REQUEST, "Washer is offline");
+    }
 
-  const activeBooking = await refreshProviderBusyState(washer);
-  if (activeBooking) {
-    throw new AppError(httpStatus.BAD_REQUEST, "Washer is currently busy");
-  }
+    const activeBooking = await refreshProviderBusyState(washer);
+    if (activeBooking) {
+      throw new AppError(httpStatus.BAD_REQUEST, "Washer is currently busy");
+    }
 
-  if (!isProviderAvailableNow(washer, new Date(bookingDate))) {
-    throw new AppError(
-      httpStatus.BAD_REQUEST,
-      "Washer is outside their saved availability"
-    );
-  }
+    if (!isProviderAvailableNow(washer, new Date(bookingDate))) {
+      throw new AppError(
+        httpStatus.BAD_REQUEST,
+        "Washer is outside their saved availability"
+      );
+    }
 
-  if (washer.dailyWashLimit <= 0) {
-    throw new AppError(httpStatus.BAD_REQUEST, "Washer daily limit completed");
+    if (washer.dailyWashLimit <= 0) {
+      throw new AppError(httpStatus.BAD_REQUEST, "Washer daily limit completed");
+    }
   }
 
   const bookedService = await Service.findOne({
@@ -127,6 +189,20 @@ export const createBooking = catchAsync(async (req, res) => {
       httpStatus.BAD_REQUEST,
       "Selected service does not belong to this provider"
     );
+  }
+
+  if (isLater) {
+    // Slot ka asal takrao — service ki muddat ke sath. Do customers
+    // ko ek hi waqt kabhi confirm nahi hota.
+    const durationMin = serviceDurationMin(bookedService);
+    if (
+      await hasSlotConflict(provider, scheduledDate, durationMin)
+    ) {
+      throw new AppError(
+        httpStatus.CONFLICT,
+        "That time has just been taken — please choose another time"
+      );
+    }
   }
 
   if (payment?.method && payment.method !== "online") {
@@ -284,8 +360,18 @@ export const createBooking = catchAsync(async (req, res) => {
       status: "pending",
     },
     status: "pending",
+    bookingType: isLater ? "later" : "now",
+    scheduledAt: isLater ? scheduledDate : null,
+    requestExpiresAt: isLater
+      ? new Date(scheduledDate.getTime() - LATER_RESPONSE_CUTOFF_MIN * 60000)
+      : null,
     statusHistory: [
-      { status: "pending", at: new Date(), by: "user", note: "Booking requested" },
+      {
+        status: "pending",
+        at: new Date(),
+        by: "user",
+        note: isLater ? "Later booking requested" : "Booking requested",
+      },
     ],
   });
 
@@ -342,6 +428,8 @@ export const createBooking = catchAsync(async (req, res) => {
       coordinates: [address.longitude, address.latitude],
     },
     bookingDate,
+    bookingType: booking.bookingType || "now",
+    scheduledAt: booking.scheduledAt || null,
     price: booking.price,
     finalPrice: booking.finalPrice,
     discount: booking.discountPrice,
@@ -357,8 +445,10 @@ export const createBooking = catchAsync(async (req, res) => {
 
   // 🔔 Push: new booking request → provider
   notifyUser(provider.toString(), {
-    title: "New booking request!",
-    body: `${customerPayload.name || "A customer"} requested ${bookedService?.title || "a wash"} — £${booking.finalPrice}`,
+    title: isLater ? "New later booking request!" : "New booking request!",
+    body: isLater
+      ? `${customerPayload.name || "A customer"} requested ${bookedService?.title || "a wash"} for ${formatLondonDateTime(scheduledDate)} — £${booking.finalPrice}`
+      : `${customerPayload.name || "A customer"} requested ${bookedService?.title || "a wash"} — £${booking.finalPrice}`,
     data: {
       type: "new_booking_request",
       bookingId: booking._id.toString(),
@@ -827,6 +917,20 @@ export const cancelBooking = catchAsync(async (req, res) => {
     );
   }
 
+  // Later booking: paid ho aur waqt 60 minute se qareeb ho to app
+  // se cancel band hai — support se rabta (document D-L6).
+  if (booking.bookingType === "later" && booking.payment?.status === "paid") {
+    const startMs = new Date(
+      booking.scheduledAt || booking.bookingDate
+    ).getTime();
+    if (Date.now() > startMs - LATER_FREE_CANCEL_MIN * 60000) {
+      throw new AppError(
+        httpStatus.BAD_REQUEST,
+        "This booking starts in less than an hour and can no longer be cancelled in the app. Please contact support."
+      );
+    }
+  }
+
   booking.status = "cancelled";
   booking.cancelledBy = "user";
   booking.cancelledAt = new Date();
@@ -844,6 +948,16 @@ export const cancelBooking = catchAsync(async (req, res) => {
   ];
   await booking.save();
   await refreshProviderBusyState(booking.provider);
+
+  // Later booking paid thi to mukammal refund asal raaste par
+  // (unpaid par yeh khud no-op hai).
+  if (booking.bookingType === "later") {
+    await refundLaterBookingInFull(booking, {
+      reason: "Customer cancelled a scheduled booking",
+      initiatedBy: "customer",
+      decidedBy: userId,
+    });
+  }
 
   // ✅ Real-time: notify the washer that the booking was cancelled
   emitToUser(booking.provider.toString(), "booking_cancelled", {
