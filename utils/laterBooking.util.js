@@ -127,10 +127,14 @@ export const isWithinScheduleLondon = (provider, date) => {
   if (!schedule.enabled) return false;
   const minutes =
     (Number(parts.hour) % 24) * 60 + Number(parts.minute);
-  return (
-    minutes >= timeToMinutes(schedule.startTime, "08:00") &&
-    minutes < timeToMinutes(schedule.endTime, "17:30")
-  );
+  const startMin = timeToMinutes(schedule.startTime, "08:00");
+  const endMin = timeToMinutes(schedule.endTime, "17:30");
+  // System ka mojooda usool (availability.util): shuru aur aakhir
+  // barabar hon to provider pura din available hai; aakhir pehle
+  // ho to waqt aadhi raat se aage jata hai (overnight).
+  if (startMin === endMin) return true;
+  if (startMin < endMin) return minutes >= startMin && minutes < endMin;
+  return minutes >= startMin || minutes < endMin;
 };
 
 // Service ki muddat — durationMinutes ho to wohi, warna type ke
@@ -213,6 +217,18 @@ export const computeSlotsForDate = async (provider, dateStr, durationMin) => {
   const { offsetMs } = londonDayRangeUtc(dateStr);
   const startMin = timeToMinutes(schedule.startTime, "08:00");
   const endMin = timeToMinutes(schedule.endTime, "17:30");
+  // Waqt ke hisay: barabar shuru/aakhir = pura din (12 AM–12 AM
+  // wali setting); aakhir pehle ho to overnight (aadhi raat tak +
+  // aadhi raat ke baad wala hissa usi din ki list me).
+  const segments =
+    startMin === endMin
+      ? [[0, 24 * 60]]
+      : endMin > startMin
+        ? [[startMin, endMin]]
+        : [
+            [startMin, 24 * 60],
+            [0, endMin],
+          ];
   const bookings = await fetchDayBookings(provider._id, dateStr);
   const busy = bookings.map((booking) => {
     const bStart = new Date(booking.bookingDate).getTime();
@@ -223,25 +239,28 @@ export const computeSlotsForDate = async (provider, dateStr, durationMin) => {
   });
   const now = Date.now();
   const slots = [];
-  for (
-    let minute = startMin;
-    minute + durationMin <= endMin;
-    minute += LATER_SLOT_STEP_MIN
-  ) {
-    const hh = String(Math.floor(minute / 60)).padStart(2, "0");
-    const mm = String(minute % 60).padStart(2, "0");
-    const startUtc = Date.parse(`${dateStr}T${hh}:${mm}:00Z`) - offsetMs;
-    const endUtc = startUtc + durationMin * 60000;
-    const taken = busy.some((slot) =>
-      overlaps(startUtc, endUtc, slot.start, slot.end)
-    );
-    slots.push({
-      start: new Date(startUtc).toISOString(),
-      end: new Date(endUtc).toISOString(),
-      label: `${hh}:${mm}`,
-      available: startUtc > now && !taken,
-    });
+  for (const [segStart, segEnd] of segments) {
+    for (
+      let minute = segStart;
+      minute + durationMin <= segEnd;
+      minute += LATER_SLOT_STEP_MIN
+    ) {
+      const hh = String(Math.floor(minute / 60)).padStart(2, "0");
+      const mm = String(minute % 60).padStart(2, "0");
+      const startUtc = Date.parse(`${dateStr}T${hh}:${mm}:00Z`) - offsetMs;
+      const endUtc = startUtc + durationMin * 60000;
+      const taken = busy.some((slot) =>
+        overlaps(startUtc, endUtc, slot.start, slot.end)
+      );
+      slots.push({
+        start: new Date(startUtc).toISOString(),
+        end: new Date(endUtc).toISOString(),
+        label: `${hh}:${mm}`,
+        available: startUtc > now && !taken,
+      });
+    }
   }
+  slots.sort((a, b) => a.start.localeCompare(b.start));
   return {
     date: dateStr,
     closed: false,
