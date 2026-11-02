@@ -267,10 +267,22 @@ export const createBooking = catchAsync(async (req, res) => {
   let appliedCoupon = null;
 
   
-  const normalizedPostalCode = (postalCode || "")
+  let normalizedPostalCode = (postalCode || "")
     .toString()
     .toUpperCase()
     .trim();
+
+  // Kuch app versions postalCode khali bhejti hain jab ke wohi postcode
+  // address ki line me maujood hota hai — wahan se nikaal lo, taake
+  // purani apps par bhi booking na ruke.
+  if (!normalizedPostalCode) {
+    const line = (address?.addressLine || "").toString();
+    const match = line.match(/\b([A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2})\b/i);
+    if (match) {
+      const compact = match[1].replace(/\s+/g, "").toUpperCase();
+      normalizedPostalCode = `${compact.slice(0, -3)} ${compact.slice(-3)}`;
+    }
+  }
 
   if (!normalizedPostalCode) {
     throw new AppError(httpStatus.BAD_REQUEST, "postalCode is required");
@@ -604,8 +616,7 @@ export const updateBookingStatus = catchAsync(async (req, res) => {
   }
   if (status === "arrived" && !booking.arrivedAt) {
     booking.arrivedAt = new Date();
-    // washEndsAt yahan NAHI banta — woh wash START par banta hai
-    // (provider ke Start Wash par, asal service muddat se).
+    booking.washEndsAt = new Date(booking.arrivedAt.getTime() + 30 * 60 * 1000);
   }
   booking.statusHistory = [
     ...(booking.statusHistory || []),
@@ -686,7 +697,7 @@ export const updateBookingStatus = catchAsync(async (req, res) => {
     ongoing:  "Your car wash has started!",
     completed:"Your car wash is complete! Please rate your experience.",
     cancelled:"Your booking has been cancelled.",
-    arrived:"Your customer has arrived at your driveway.",
+    arrived:"The user has arrived at the washer location.",
   };
 
   if (status === "completed") {
@@ -800,16 +811,6 @@ export const updateBookingStatus = catchAsync(async (req, res) => {
       },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
-  }
-
-  // 🔔 Push: customer pohonch gaya → provider ko foran khabar
-  // (app band ho to bhi) — client ki requirement.
-  if (status === "arrived") {
-    notifyUser(bookingProviderId, {
-      title: "Customer Arrived",
-      body: "Your customer has arrived at your driveway.",
-      data: { type: "booking_arrived", bookingId: booking._id.toString() },
-    });
   }
 
   sendResponse(res, {

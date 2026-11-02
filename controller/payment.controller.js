@@ -468,7 +468,11 @@ export const createPayment = async (req, res) => {
     // ── Wallet / Card split (Payments phase) ────────────────────
     // Sirf booking payments ke liye; tips hamesha card se jate hain.
     let walletUse = 0;
-    if (paymentType === "booking" && payMethod !== "card") {
+    if (
+      payMethod !== "card" &&
+      (paymentType === "booking" ||
+        (paymentType === "tips" && payMethod === "wallet"))
+    ) {
       const walletDoc = await getOrCreateWallet(authUserId);
       const balance = asMoney(walletDoc.balance);
       if (payMethod === "wallet") {
@@ -520,11 +524,17 @@ export const createPayment = async (req, res) => {
         walletAmount: walletUse,
         cardAmount: 0,
       });
-      await updateBookingAsPaid(record, walletTxn.txnNumber, {
-        method: "wallet",
-        walletAmount: walletUse,
-        cardAmount: 0,
-      });
+      if (paymentType === "tips") {
+        // Tip wallet se kata — provider ke balance me tip jama karo
+        // (booking ko "paid" nahi karna; woh pehle se paid hai).
+        await addTipToProviderBalance(record);
+      } else {
+        await updateBookingAsPaid(record, walletTxn.txnNumber, {
+          method: "wallet",
+          walletAmount: walletUse,
+          cardAmount: 0,
+        });
+      }
       return res.status(200).json({
         success: true,
         message: "Paid with wallet.",

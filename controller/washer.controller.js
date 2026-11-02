@@ -25,10 +25,13 @@ import { broadcast, emitToUser } from "../socket/socket.js";
 import { recordActivity } from "../utils/activityLog.util.js";
 import { notifyUser } from "../utils/fcm.util.js";
 import {
+  LATER_DEFAULT_DURATION_MIN,
   applyLaterAcceptance,
   computeSlotsForDate,
   isWithinScheduleLondon,
+  londonDayRangeUtc,
   refundLaterBookingInFull,
+  scheduleForDate,
   serviceDurationMin,
 } from "../utils/laterBooking.util.js";
 import {
@@ -1548,9 +1551,46 @@ export const getNearbyWashers = catchAsync(async (req, res) => {
       "preferredServices",
       "catalogKey title price serviceType carSize carName carModel description isActive"
     );
-  const availableWashers = washers.filter((washer) =>
+  let availableWashers = washers.filter((washer) =>
     forLater ? true : isProviderAvailableNow(washer)
   );
+
+  // Book for Later (redesign): atDate/atTime diye jayen to sirf woh
+  // providers rakho jin ke paas us London date ke us waqt ka slot
+  // asal me khali hai (slots wala engine hi dobara istemal hota hai —
+  // working hours, takraar aur din ki hadd sab is me shamil hain).
+  if (forLater && req.query.atDate && req.query.atTime) {
+    const atDate = req.query.atDate.toString();
+    const atTime = req.query.atTime.toString();
+    if (
+      !/^\d{4}-\d{2}-\d{2}$/.test(atDate) ||
+      !/^\d{2}:\d{2}$/.test(atTime)
+    ) {
+      throw new AppError(
+        httpStatus.BAD_REQUEST,
+        "atDate (YYYY-MM-DD) and atTime (HH:MM) must be valid"
+      );
+    }
+    const checks = await Promise.all(
+      availableWashers.map(async (washer) => {
+        try {
+          const data = await computeSlotsForDate(
+            washer,
+            atDate,
+            LATER_DEFAULT_DURATION_MIN
+          );
+          if (data.closed) return null;
+          const hit = data.slots.some(
+            (slot) => slot.available && slot.label === atTime
+          );
+          return hit ? washer : null;
+        } catch (_) {
+          return null;
+        }
+      })
+    );
+    availableWashers = checks.filter(Boolean);
+  }
   await Promise.all(
     availableWashers.map((washer) => refreshProviderBusyState(washer))
   );
@@ -2477,5 +2517,125 @@ export const getWasherSlots = catchAsync(async (req, res) => {
     success: true,
     message: "Slots fetched",
     data,
+  });
+});
+
+/**
+ * GET /api/v1/washers/me/schedule?date=YYYY-MM-DD
+ * Provider ke Reservations screen ke "My Schedule" view ke liye:
+ * us London din ke working-hours slots, har slot ke sath halat
+ * (available / booked / past) aur booked slot par booking ka khulasa.
+ */
+export const getMySchedule = catchAsync(async (req, res) => {
+  if (req.user?.role !== "provider") {
+    throw new AppError(httpStatus.FORBIDDEN, "Provider only");
+  }
+  const date = (req.query.date || "").toString();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "date query param is required (YYYY-MM-DD)"
+    );
+  }
+  const provider = await User.findById(req.user._id).select("availability");
+  if (!provider) {
+    throw new AppError(httpStatus.NOT_FOUND, "Provider not found");
+  }
+  const schedule = scheduleForDate(provider, date);
+  if (!schedule.enabled) {
+    return sendResponse(res, {
+      statusCode: httpStatus.OK,
+      success: true,
+      message: "Schedule fetched",
+      data: { date, closed: true, slots: [] },
+    });
+  }
+
+  const { startUtc, endUtc, offsetMs } = londonDayRangeUtc(date);
+  const dayStart = new Date(startUtc);
+  const dayEnd = new Date(endUtc);
+  const bookings = await Booking.find({
+    provider: req.user._id,
+    status: { $in: ["pending", "accepted", "arrived", "ongoing"] },
+    $or: [
+      { scheduledAt: { $gte: dayStart, $lt: dayEnd } },
+      { bookingDate: { $gte: dayStart, $lt: dayEnd } },
+    ],
+  })
+    .populate("user", "name")
+    .populate("service", "title durationMinutes serviceType")
+    .lean();
+  const busy = bookings.map((booking) => {
+    const start = new Date(booking.scheduledAt || booking.bookingDate).getTime();
+    return {
+      start,
+      end: start + serviceDurationMin(booking.service) * 60000,
+      booking,
+    };
+  });
+
+  const toMinutes = (value, fallback) => {
+    const [h, m] = (value || "").toString().split(":").map(Number);
+    if (Number.isFinite(h) && Number.isFinite(m)) return h * 60 + m;
+    const [fh, fm] = fallback.split(":").map(Number);
+    return fh * 60 + fm;
+  };
+  const startMin = toMinutes(schedule.startTime, "08:00");
+  const endMin = toMinutes(schedule.endTime, "17:30");
+  const segments =
+    startMin === endMin
+      ? [[0, 24 * 60]]
+      : endMin > startMin
+        ? [[startMin, endMin]]
+        : [
+            [startMin, 24 * 60],
+            [0, endMin],
+          ];
+
+  const now = Date.now();
+  const slots = [];
+  for (const [segStart, segEnd] of segments) {
+    for (let minute = segStart; minute < segEnd; minute += 30) {
+      const hh = String(Math.floor(minute / 60)).padStart(2, "0");
+      const mm = String(minute % 60).padStart(2, "0");
+      const slotStart = Date.parse(`${date}T${hh}:${mm}:00Z`) - offsetMs;
+      const slotEnd = slotStart + 30 * 60000;
+      const hit = busy.find(
+        (b) => slotStart < b.end && b.start < slotEnd
+      );
+      const slot = {
+        start: new Date(slotStart).toISOString(),
+        label: `${hh}:${mm}`,
+        state: hit ? "booked" : slotEnd <= now ? "past" : "available",
+      };
+      if (hit) {
+        const b = hit.booking;
+        const snap = b.vehicleSnapshot || {};
+        const vehicleLabel = [snap.make, snap.model]
+          .filter(Boolean)
+          .join(" ")
+          .trim();
+        slot.booking = {
+          id: b._id.toString(),
+          customerName: b.user?.name || "Customer",
+          serviceTitle: b.service?.title || "Wash",
+          status: b.status,
+          bookingType: b.bookingType || "now",
+          price: b.finalPrice ?? b.price ?? 0,
+          vehicleLabel,
+          vehicleYear: snap.year || null,
+          registrationNo: snap.registrationNo || "",
+          vehicleImage: snap.image || "",
+        };
+      }
+      slots.push(slot);
+    }
+  }
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Schedule fetched",
+    data: { date, closed: false, slots },
   });
 });

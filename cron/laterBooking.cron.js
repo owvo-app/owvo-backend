@@ -1,4 +1,5 @@
 import cron from "node-cron";
+import { User } from "../model/user.model.js";
 import { Booking } from "../model/booking.model.js";
 import { notifyUser } from "../utils/fcm.util.js";
 import { emitToUser } from "../socket/socket.js";
@@ -150,9 +151,14 @@ export const laterBookingCron = () => {
         const when = formatLondonDateTime(
           booking.scheduledAt || booking.bookingDate
         );
+        const providerDoc = await User.findById(booking.provider)
+          .select("name")
+          .lean()
+          .catch(() => null);
+        const providerName = providerDoc?.name || "your car wash provider";
         notifyUser(booking.user.toString(), {
           title: "Your wash is in 1 hour",
-          body: `Your scheduled wash is at ${when}. Please head over in good time.`,
+          body: `Your car wash is in 1 hour at ${providerName} (${when}). Please allow enough travel time. Tap to view or get directions.`,
           data: {
             type: "later_booking_upcoming",
             bookingId: booking._id.toString(),
