@@ -8,6 +8,10 @@ import {
   createWalletTopup,
   createRefundRequest,
   getMyRefundRequests,
+  createCardSetup,
+  getMyCards,
+  deleteMyCard,
+  setDefaultCard,
 } from "../controller/payment.controller.js";
 import { protect } from "../middleware/auth.middleware.js";
 
@@ -26,6 +30,12 @@ router.post("/confirm-payment", protect, confirmPayment);
 router.get("/wallet", protect, getMyWallet);
 router.get("/wallet/transactions", protect, getMyWalletTransactions);
 router.post("/wallet/topup", protect, createWalletTopup);
+
+// Saved cards (Stripe SetupIntent se save hote hain)
+router.post("/cards/setup", protect, createCardSetup);
+router.get("/cards", protect, getMyCards);
+router.delete("/cards/:paymentMethodId", protect, deleteMyCard);
+router.post("/cards/:paymentMethodId/default", protect, setDefaultCard);
 
 // Customer refund requests
 router.post("/refund-request", protect, createRefundRequest);
