@@ -2,7 +2,7 @@ import Stripe from "stripe";
 import { Booking } from "../model/booking.model.js";
 import { paymentInfo } from "../model/payment.model.js";
 import { User } from "../model/user.model.js";
-import { emitToUser } from "../socket/socket.js";
+import { broadcast, emitToUser } from "../socket/socket.js";
 import { notifyUser } from "../utils/fcm.util.js";
 import { Payout } from "../model/payout.model.js";
 import { SupportTicket } from "../model/supportTicket.model.js";
@@ -87,6 +87,19 @@ const updateBookingAsPaid = async (paymentRecord, transactionId, opts = {}) => {
       opts.cardAmount !== undefined ? opts.cardAmount : paymentRecord.price,
   };
   await booking.save();
+
+  // Admin ki bookings list ko bhi taza karo — warna payment mukammal
+  // hone ke baad bhi list me "Pending" dikhta rehta hai, jabke detail
+  // panel sahi "Paid" dikhati hai (list sirf booking wale isharon par
+  // refresh hoti thi, payment wale par nahi).
+  broadcast("admin_booking_status_updated", {
+    bookingId: booking._id.toString(),
+    status: booking.status,
+    paymentStatus: "paid",
+    providerId: booking.provider?._id?.toString(),
+    userId: booking.user?._id?.toString(),
+    updatedAt: booking.updatedAt,
+  });
 
   if (!wasPaid && booking.provider?._id) {
     const amount = paymentRecord.price;
