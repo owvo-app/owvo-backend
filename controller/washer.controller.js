@@ -1104,6 +1104,18 @@ export const advanceWashStage = catchAsync(async (req, res) => {
     );
   }
 
+  // Adaigi ke baghair wash ke marhale (stages) bhi aagay NAHI
+  // barh sakte (£0 wali booking mustasna).
+  if (
+    booking.payment?.status !== "paid" &&
+    Number(booking.finalPrice || 0) > 0
+  ) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "Customer has not paid for this booking yet"
+    );
+  }
+
   const current = booking.washStage || "rinsing";
   if (stage !== current) {
     if (STAGES.indexOf(stage) !== STAGES.indexOf(current) + 1) {
