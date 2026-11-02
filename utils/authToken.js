@@ -1,6 +1,10 @@
 import jwt from 'jsonwebtoken';
 
-const DEFAULT_ACCESS_TOKEN_EXPIRES_IN = "1h";
+// Access token ki default muddat 7 din — pehle 1 ghanta thi, jis se
+// app ka token roz ke istemal me khatam ho kar "Invalid token"
+// wale error deta tha. Render par JWT_ACCESS_EXPIRES_IN set ho to
+// wohi istemal hoga; ye sirf default hai.
+const DEFAULT_ACCESS_TOKEN_EXPIRES_IN = "7d";
 const DEFAULT_REFRESH_TOKEN_EXPIRES_IN = "30d";
 
 const getConfiguredValue = (name) => process.env[name]?.trim();
