@@ -12,6 +12,7 @@ import {
   unsaveBookingForLater,
   addPreferredService,
   completeWash,
+  advanceWashStage,
   getAllWashers,
   getWasherAvailability,
   getWasherPolicyStatus,
@@ -77,6 +78,7 @@ router.post("/decline/:bookingId", protect, declineBooking);
 router.post("/save/:bookingId", protect, saveBookingForLater);
 router.post("/unsave/:bookingId", protect, unsaveBookingForLater);
 router.post("/complete/:bookingId", protect, completeWash);
+router.post("/stage/:bookingId", protect, advanceWashStage);
 router.post("/wallet/cashout", protect, requestCashOut);
 router.get("/connect/status", protect, getConnectStatus);
 router.post("/connect/onboarding", protect, createConnectOnboarding);

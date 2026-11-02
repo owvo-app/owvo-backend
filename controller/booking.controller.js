@@ -604,7 +604,8 @@ export const updateBookingStatus = catchAsync(async (req, res) => {
   }
   if (status === "arrived" && !booking.arrivedAt) {
     booking.arrivedAt = new Date();
-    booking.washEndsAt = new Date(booking.arrivedAt.getTime() + 30 * 60 * 1000);
+    // washEndsAt yahan NAHI banta — woh wash START par banta hai
+    // (provider ke Start Wash par, asal service muddat se).
   }
   booking.statusHistory = [
     ...(booking.statusHistory || []),
@@ -685,7 +686,7 @@ export const updateBookingStatus = catchAsync(async (req, res) => {
     ongoing:  "Your car wash has started!",
     completed:"Your car wash is complete! Please rate your experience.",
     cancelled:"Your booking has been cancelled.",
-    arrived:"The user has arrived at the washer location.",
+    arrived:"Your customer has arrived at your driveway.",
   };
 
   if (status === "completed") {
@@ -799,6 +800,16 @@ export const updateBookingStatus = catchAsync(async (req, res) => {
       },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
+  }
+
+  // 🔔 Push: customer pohonch gaya → provider ko foran khabar
+  // (app band ho to bhi) — client ki requirement.
+  if (status === "arrived") {
+    notifyUser(bookingProviderId, {
+      title: "Customer Arrived",
+      body: "Your customer has arrived at your driveway.",
+      data: { type: "booking_arrived", bookingId: booking._id.toString() },
+    });
   }
 
   sendResponse(res, {

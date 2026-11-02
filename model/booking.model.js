@@ -223,6 +223,16 @@ const bookingSchema = new mongoose.Schema(
     washEndsAt: {
       type: Date,
     },
+    // Live Journey: wash asal me kab shuru hui + mojooda stage
+    // (provider chalata hai: rinsing -> washing -> drying).
+    washStartedAt: {
+      type: Date,
+    },
+    washStage: {
+      type: String,
+      enum: ["rinsing", "washing", "drying", null],
+      default: null,
+    },
   },
   { timestamps: true }
 );

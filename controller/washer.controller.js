@@ -29,6 +29,7 @@ import {
   computeSlotsForDate,
   isWithinScheduleLondon,
   refundLaterBookingInFull,
+  serviceDurationMin,
 } from "../utils/laterBooking.util.js";
 import {
   isProviderAvailableNow,
@@ -489,7 +490,7 @@ export const acceptBooking = catchAsync(async (req, res) => {
       "user",
       "_id name email phoneNumber photo location residentialAddress providerAddress customerRatingAverage customerRatingCount"
     )
-    .populate("service", "_id title price serviceType carSize carName carModel")
+    .populate("service", "_id title price serviceType durationMinutes carSize carName carModel")
     .populate("vehicle", "registrationNo make model year size image isDefault");
 
   if (!booking) {
@@ -603,7 +604,17 @@ export const acceptBooking = catchAsync(async (req, res) => {
   }
   if (status === "arrived" && !booking.arrivedAt) {
     booking.arrivedAt = new Date();
-    booking.washEndsAt = new Date(booking.arrivedAt.getTime() + 30 * 60 * 1000);
+  }
+  // Live Journey: wash shuru hote hi asal timer + pehla stage.
+  // washEndsAt ab arrival par nahi, wash START par banta hai
+  // (service ki asal muddat ke hisaab se).
+  if (status === "ongoing" && !booking.washStartedAt) {
+    booking.washStartedAt = new Date();
+    booking.washStage = "rinsing";
+    booking.washEndsAt = new Date(
+      booking.washStartedAt.getTime() +
+        serviceDurationMin(booking.service) * 60 * 1000
+    );
   }
   await booking.save();
 
@@ -666,6 +677,8 @@ export const acceptBooking = catchAsync(async (req, res) => {
       currency: booking.currency,
       arrivedAt: booking.arrivedAt,
       washEndsAt: booking.washEndsAt,
+      washStartedAt: booking.washStartedAt,
+      washStage: booking.washStage,
       message: "Your booking has been accepted! The washer is on the way.",
     });
   }
@@ -941,7 +954,33 @@ export const completeWash = catchAsync(async (req, res) => {
     throw new AppError(httpStatus.NOT_FOUND, "Booking not found");
   }
 
+  if (booking.provider.toString() !== req.user._id.toString()) {
+    throw new AppError(
+      httpStatus.FORBIDDEN,
+      "You cannot update this booking"
+    );
+  }
+
+  // Duplicate completion ki hifazat: pehle se mukammal booking par
+  // dobara snapshot / WashHistory / earnings NAHI bante — maujooda
+  // halat ka kamyab jawab wapas jata hai.
+  if (booking.status === "completed") {
+    return sendResponse(res, {
+      statusCode: httpStatus.OK,
+      success: true,
+      message: "Wash already completed",
+      data: { bookingId: booking._id, status: "completed" },
+    });
+  }
+  if (booking.status !== "ongoing") {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "Only an in-progress wash can be completed"
+    );
+  }
+
   booking.status = "completed";
+  booking.washStage = null;
   // Commission snapshot — complete hone ke lamhe ka rate pakka.
   await applyCommissionSnapshot(booking);
   await booking.save();
@@ -984,6 +1023,13 @@ export const completeWash = catchAsync(async (req, res) => {
     message: "Your car wash is complete! Please rate your experience.",
   });
 
+  // 🔔 Push: wash mukammal → customer (app band ho to bhi khabar mile)
+  notifyUser(booking.user.toString(), {
+    title: "Wash Completed!",
+    body: "Your vehicle is ready.",
+    data: { type: "wash_completed", bookingId: booking._id.toString() },
+  });
+
   // ✅ Notify washer (confirmation on their side)
   emitToUser(washer._id.toString(), "wash_completed_confirm", {
     bookingId: booking._id,
@@ -998,6 +1044,78 @@ export const completeWash = catchAsync(async (req, res) => {
     statusCode: httpStatus.OK,
     success: true,
     message: "Wash completed successfully",
+  });
+});
+
+// Live Journey: provider wash ka stage aage badhata hai
+// (rinsing -> washing -> drying). Tartib ki hifazat server par hai —
+// peeche ya chhalang nahi; wahi stage dobara bhejna kamyab no-op hai.
+// Stage tabdeeli par push NAHI (shor na ho), sirf socket live update.
+export const advanceWashStage = catchAsync(async (req, res) => {
+  const STAGES = ["rinsing", "washing", "drying"];
+  const { stage } = req.body || {};
+
+  if (!STAGES.includes(stage)) {
+    throw new AppError(httpStatus.BAD_REQUEST, "Invalid wash stage");
+  }
+
+  const booking = await Booking.findById(req.params.bookingId);
+  if (!booking) {
+    throw new AppError(httpStatus.NOT_FOUND, "Booking not found");
+  }
+  if (booking.provider.toString() !== req.user._id.toString()) {
+    throw new AppError(
+      httpStatus.FORBIDDEN,
+      "You cannot update this booking"
+    );
+  }
+  if (booking.status !== "ongoing") {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "Wash is not in progress"
+    );
+  }
+
+  const current = booking.washStage || "rinsing";
+  if (stage !== current) {
+    if (STAGES.indexOf(stage) !== STAGES.indexOf(current) + 1) {
+      throw new AppError(
+        httpStatus.BAD_REQUEST,
+        "Wash stages must advance in order (Rinsing, Washing, Drying)"
+      );
+    }
+    booking.washStage = stage;
+    await booking.save();
+  }
+
+  const payload = {
+    bookingId: booking._id,
+    status: booking.status,
+    washStage: booking.washStage,
+    washStartedAt: booking.washStartedAt,
+    washEndsAt: booking.washEndsAt,
+    arrivedAt: booking.arrivedAt,
+    message:
+      stage === "drying"
+        ? "Your wash is almost done — drying stage."
+        : "Your wash is in progress.",
+  };
+  emitToUser(booking.user.toString(), "booking_status_update", payload);
+  emitToUser(booking.provider.toString(), "booking_status_update", payload);
+  broadcast("admin_booking_status_updated", {
+    bookingId: booking._id.toString(),
+    status: booking.status,
+    washStage: booking.washStage,
+    providerId: booking.provider.toString(),
+    userId: booking.user.toString(),
+    updatedAt: booking.updatedAt,
+  });
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Wash stage updated",
+    data: { bookingId: booking._id, washStage: booking.washStage },
   });
 });
 
