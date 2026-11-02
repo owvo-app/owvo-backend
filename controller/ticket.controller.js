@@ -5,6 +5,7 @@ import { SupportTicket } from "../model/supportTicket.model.js";
 import { User } from "../model/user.model.js";
 import { Booking } from "../model/booking.model.js";
 import { emitToUser } from "../socket/socket.js";
+import { notifyUser } from "../utils/fcm.util.js";
 
 const TICKET_TYPES = ["complaint", "refund", "dispute", "technical", "cancellation", "payment"];
 const TICKET_STATUSES = ["open", "in_progress", "resolved", "closed"];
@@ -197,6 +198,17 @@ export const updateAdminTicket = catchAsync(async (req, res) => {
       message: `Your ticket ${ticket.ticketNumber} is now ${ticket.status}`,
     });
   } catch (e) { /* socket optional */ }
+  if (status) {
+    notifyUser(ticket.reporter.toString(), {
+      title: `Support ticket ${ticket.ticketNumber}`,
+      body: `Your ticket ${ticket.ticketNumber} is now ${ticket.status}`,
+      data: {
+        type: "support_status",
+        ticketId: ticket._id.toString(),
+        ticketNumber: ticket.ticketNumber,
+      },
+    });
+  }
 
   res.status(httpStatus.OK).json({ success: true, data: ticket });
 });
@@ -225,6 +237,15 @@ export const adminReplyToTicket = catchAsync(async (req, res) => {
       message: `New reply on ticket ${ticket.ticketNumber}`,
     });
   } catch (e) { /* socket optional */ }
+  notifyUser(ticket.reporter.toString(), {
+    title: `Support reply — ${ticket.ticketNumber}`,
+    body: text.trim().slice(0, 140),
+    data: {
+      type: "support_message",
+      ticketId: ticket._id.toString(),
+      ticketNumber: ticket.ticketNumber,
+    },
+  });
 
   res.status(httpStatus.OK).json({ success: true, data: ticket });
 });

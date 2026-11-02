@@ -1,5 +1,6 @@
 import admin from "firebase-admin";
 import { User } from "../model/user.model.js";
+import { Notification } from "../model/notification.model.js";
 
 /**
  * Firebase Cloud Messaging (push notifications).
@@ -119,9 +120,45 @@ export const sendPushToUser = async (
   }
 };
 
+/**
+ * Notification ki aik copy inbox ke liye database me bhi mehfooz karo.
+ * Pehle push sirf phone par aati thi aur kahin rehti nahi thi — is liye
+ * app ka Notifications page hamesha khaali nazar aata tha. Kabhi fail
+ * nahi hota (sirf log), taake asal kaam na ruke.
+ *
+ * Kuch flows apna record pehle hi bana chuke hote hain (masalan admin
+ * ka Send Message, Later refund) — bilkul waisi hi copy dobara na bane,
+ * is liye pichhle 15 seconds me waisa record ho to chhor do.
+ */
+const saveNotificationCopy = async (userId, payload) => {
+  try {
+    if (!userId || !payload?.title) return;
+    const title = String(payload.title).trim();
+    const message = String(payload.body || payload.title).trim();
+    if (!title || !message) return;
+    const duplicate = await Notification.exists({
+      recipient: userId,
+      title,
+      message,
+      createdAt: { $gte: new Date(Date.now() - 15000) },
+    });
+    if (duplicate) return;
+    await Notification.create({
+      recipient: userId,
+      type: "general",
+      title: title.slice(0, 200),
+      message: message.slice(0, 1000),
+      metadata: payload.data || {},
+    });
+  } catch (e) {
+    console.warn("[FCM] notification save failed:", e?.message || e);
+  }
+};
+
 /** Fire-and-forget wrapper for use inside request handlers. */
 export const notifyUser = (userId, payload) => {
   sendPushToUser(userId, payload).catch((e) =>
     console.warn("[FCM] notify failed:", e?.message || e)
   );
+  saveNotificationCopy(userId, payload);
 };
