@@ -1374,6 +1374,38 @@ export const createAdminBooking = catchAsync(async (req, res) => {
 const bkEscapeRegex = (value) =>
   String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+// Europe/London ke aaj ke din ki shuruaat ka UTC lamha — GMT/BST dono
+// me durust. "Upcoming Later" nazar is se peeche ki scheduled bookings
+// nahi uthata (aaj subah wali, jo abhi baqi hain, woh shamil rehti hain).
+const bkLondonStartOfToday = () => {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/London",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(now);
+  const part = (type) =>
+    Number(parts.find((x) => x.type === type)?.value || 0);
+  const nowSecMs = Math.floor(now.getTime() / 1000) * 1000;
+  const londonAsUtcMs = Date.UTC(
+    part("year"),
+    part("month") - 1,
+    part("day"),
+    part("hour") % 24,
+    part("minute"),
+    part("second")
+  );
+  const offsetMs = londonAsUtcMs - nowSecMs;
+  return new Date(
+    Date.UTC(part("year"), part("month") - 1, part("day")) - offsetMs
+  );
+};
+
 const bkBaseFilter = (query) => {
   const { providerId, customerId, from, to } = query;
   const base = {};
@@ -1432,6 +1464,21 @@ const bkBuildBookingFilters = async (query) => {
     filter._id = { $in: disputedIds };
   }
 
+  // Book for Later: type filter + "upcoming" nazar. Upcoming me global
+  // date-range bookingDate par laagu NAHI hota — woh range aam bookings
+  // ke liye hai; mustaqbil ki scheduled bookings us se chhup jati hain.
+  // Is bajaye scheduledAt aaj (London) se aagy + abhi zinda statuses.
+  if (query.bookingType === "later" || query.bookingType === "now") {
+    filter.bookingType = query.bookingType;
+  }
+  if (query.upcoming === "1" || query.upcoming === "true") {
+    delete filter.bookingDate;
+    filter.scheduledAt = { $gte: bkLondonStartOfToday() };
+    if (!query.status) {
+      filter.status = { $in: ["pending", "accepted", "arrived", "ongoing"] };
+    }
+  }
+
   const search = String(query.search || "").trim();
   if (search) {
     const rx = new RegExp(bkEscapeRegex(search), "i");
@@ -1481,7 +1528,11 @@ export const getAdminBookings = catchAsync(async (req, res) => {
   const [items, total] = await Promise.all([
     Booking.find(filter)
       .populate(bookingPopulate)
-      .sort({ createdAt: -1 })
+      .sort(
+        req.query.sort === "scheduled"
+          ? { scheduledAt: 1, createdAt: -1 }
+          : { createdAt: -1 }
+      )
       .skip((pageNumber - 1) * pageSize)
       .limit(pageSize),
     Booking.countDocuments(filter),
