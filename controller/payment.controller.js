@@ -938,13 +938,26 @@ export const getMyCards = async (req, res) => {
       customer: req.user.stripeCustomerId,
       type: "card",
     });
+    // Pehla saved card khud bakhud default ban jaye — warna top-up
+    // aur booking me "saved card se do" wala ikhtiyar aata hi nahi.
+    let effectiveDefaultId = defaultId;
+    if (!effectiveDefaultId && (list.data || []).length > 0) {
+      effectiveDefaultId = list.data[0].id;
+      try {
+        await stripe.customers.update(req.user.stripeCustomerId, {
+          invoice_settings: { default_payment_method: effectiveDefaultId },
+        });
+      } catch (_) {
+        // Sirf nishan lagana kafi hai; asal default agli dafa set ho jayega.
+      }
+    }
     const cards = (list.data || []).map((pm) => ({
       id: pm.id,
       brand: pm.card?.brand || "card",
       last4: pm.card?.last4 || "",
       expMonth: pm.card?.exp_month || 0,
       expYear: pm.card?.exp_year || 0,
-      isDefault: pm.id === defaultId,
+      isDefault: pm.id === effectiveDefaultId,
     }));
     return res.status(200).json({
       success: true,
