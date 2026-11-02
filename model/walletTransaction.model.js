@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { getNextTxnNumber } from "../utils/counter.util.js";
 
 // Wallet ki har harkat ka record — yahi asal ledger hai, Wallet.balance
 // is ki summary hai. amount hamesha signed hai: credit +, debit −.
@@ -57,6 +58,15 @@ const walletTransactionSchema = new mongoose.Schema(
 );
 
 walletTransactionSchema.index({ user: 1, createdAt: -1 });
+
+// Har record ko khud bakhud agla TXN number do — koi bhi jagah
+// (top-up, payment, refund) number dena bhool jaye to unique index
+// se takra kar fail na ho (E11000 null wali ghalti ka mustaqil hal).
+walletTransactionSchema.pre("save", async function () {
+  if (!this.txnNumber) {
+    this.txnNumber = await getNextTxnNumber();
+  }
+});
 
 export const WalletTransaction = mongoose.model(
   "WalletTransaction",
