@@ -426,7 +426,7 @@ export const createPayment = async (req, res) => {
 
   try {
     const booking = await Booking.findById(bookingId).select(
-      "user provider price finalPrice currency payment status bookingType"
+      "user provider price finalPrice currency payment status"
     );
 
     if (!booking) {
@@ -439,20 +439,6 @@ export const createPayment = async (req, res) => {
 
     if (paymentType === "booking" && booking.payment?.status === "paid") {
       return sendFailure(res, 409, "Booking is already paid.");
-    }
-
-    // Book for Later: payment sirf tab jab provider accept kar
-    // chuka ho — us se pehle paisa lena hi nahi hai.
-    if (
-      paymentType === "booking" &&
-      booking.bookingType === "later" &&
-      booking.status !== "accepted"
-    ) {
-      return sendFailure(
-        res,
-        400,
-        "The provider has not accepted this booking yet."
-      );
     }
 
     const amountToCharge =
@@ -560,6 +546,20 @@ export const createPayment = async (req, res) => {
       });
     }
 
+    // Saved card se adaigi — card isi customer ka hona chahiye.
+    const savedCardId = (req.body.savedCardId || "").toString().trim();
+    let savedCardParams = null;
+    if (savedCardId) {
+      const customer = await assertCardBelongsTo(res, req.user, savedCardId);
+      if (!customer) return;
+      savedCardParams = {
+        customer: customer.id,
+        payment_method: savedCardId,
+        off_session: true,
+        confirm: true,
+      };
+    }
+
     const metadata = {
       userId: authUserId,
       bookingId: booking._id.toString(),
@@ -582,6 +582,7 @@ export const createPayment = async (req, res) => {
             ? `owvo tip for booking ${booking._id}`
             : `owvo booking ${booking._id}`,
         ...stripeMethodParams(selectedPaymentMethod),
+        ...(savedCardParams || {}),
       });
 
       await paymentInfo.create({
@@ -599,6 +600,31 @@ export const createPayment = async (req, res) => {
         cardAmount: cardPart,
       });
     } catch (stripeError) {
+      // Saved card ne inkar kar diya — record bana kar fail mark
+      // karo; wallet hold markPaymentFailed khud settle karta hai.
+      if (savedCardParams && stripeError?.payment_intent) {
+        const pi = stripeError.payment_intent;
+        await paymentInfo.create({
+          userId: authUserId,
+          bookingId: booking._id,
+          providerId: booking.provider,
+          price: amountToCharge,
+          currency: currency.toUpperCase(),
+          transactionId: pi.id,
+          paymentStatus: "failed",
+          status: "failed",
+          paymentMethod: selectedPaymentMethod,
+          type: paymentType,
+          walletAmount: walletUse,
+          cardAmount: cardPart,
+        });
+        await markPaymentFailed(pi);
+        return sendFailure(
+          res,
+          402,
+          "Your saved card was declined. Please try another card."
+        );
+      }
       // Card side ban hi nahi paya — wallet hold foran wapas.
       if (walletHold) {
         await Wallet.findByIdAndUpdate(walletHold.wallet, {
@@ -608,6 +634,31 @@ export const createPayment = async (req, res) => {
         await walletHold.save();
       }
       throw stripeError;
+    }
+
+    if (savedCardParams) {
+      if (paymentIntent.status === "succeeded") {
+        await markPaymentSucceeded(paymentIntent);
+        return res.status(200).json({
+          success: true,
+          message: "Payment confirmed.",
+          data: {
+            paid: true,
+            paymentIntentId: paymentIntent.id,
+            paymentMethod: selectedPaymentMethod,
+          },
+        });
+      }
+      if (paymentIntent.status !== "requires_action") {
+        await markPaymentFailed(paymentIntent);
+        return sendFailure(
+          res,
+          402,
+          "Your saved card could not be charged. Please try another card."
+        );
+      }
+      // requires_action — neeche wala aam jawab (clientSecret);
+      // app Stripe sheet se tasdeeq karwa legi.
     }
 
     return res.status(200).json({
@@ -811,6 +862,145 @@ export const getMyWalletTransactions = async (req, res) => {
   }
 };
 
+// ── Saved cards (Stripe) ────────────────────────────────────────
+// Card ka number hamare server ko kabhi nahi milta — Stripe ki
+// sheet card leti hai, hamare pas sirf card ki pehchan (pm id)
+// aur aakhri 4 hindsay ate hain.
+const getOrCreateStripeCustomer = async (user) => {
+  const stripe = getStripe();
+  if (user.stripeCustomerId) {
+    try {
+      const existing = await stripe.customers.retrieve(user.stripeCustomerId);
+      if (existing && !existing.deleted) return existing;
+    } catch (_) {
+      // purana id kharab ho to naya bana lo
+    }
+  }
+  const customer = await stripe.customers.create({
+    email: user.email || undefined,
+    name: user.name || undefined,
+    metadata: { userId: user._id.toString() },
+  });
+  user.stripeCustomerId = customer.id;
+  await user.save();
+  return customer;
+};
+
+const assertCardBelongsTo = async (res, user, savedCardId) => {
+  const customer = await getOrCreateStripeCustomer(user);
+  const pm = await getStripe().paymentMethods.retrieve(savedCardId);
+  if (!pm || pm.customer !== customer.id) {
+    sendFailure(res, 403, "This card does not belong to you.");
+    return null;
+  }
+  return customer;
+};
+
+export const createCardSetup = async (req, res) => {
+  try {
+    const customer = await getOrCreateStripeCustomer(req.user);
+    const setupIntent = await getStripe().setupIntents.create({
+      customer: customer.id,
+      usage: "off_session",
+      payment_method_types: ["card"],
+    });
+    return res.status(200).json({
+      success: true,
+      message: "Card setup started.",
+      data: { clientSecret: setupIntent.client_secret },
+    });
+  } catch (error) {
+    console.error("Card setup error:", error?.message || error);
+    return sendFailure(
+      res,
+      error?.statusCode || 500,
+      "Could not start card setup. Please try again."
+    );
+  }
+};
+
+export const getMyCards = async (req, res) => {
+  try {
+    if (!req.user.stripeCustomerId) {
+      return res.status(200).json({
+        success: true,
+        message: "No saved cards.",
+        data: { cards: [] },
+      });
+    }
+    const stripe = getStripe();
+    const customer = await stripe.customers.retrieve(req.user.stripeCustomerId);
+    const defaultId =
+      customer && !customer.deleted
+        ? customer.invoice_settings?.default_payment_method || ""
+        : "";
+    const list = await stripe.paymentMethods.list({
+      customer: req.user.stripeCustomerId,
+      type: "card",
+    });
+    const cards = (list.data || []).map((pm) => ({
+      id: pm.id,
+      brand: pm.card?.brand || "card",
+      last4: pm.card?.last4 || "",
+      expMonth: pm.card?.exp_month || 0,
+      expYear: pm.card?.exp_year || 0,
+      isDefault: pm.id === defaultId,
+    }));
+    return res.status(200).json({
+      success: true,
+      message: "Saved cards.",
+      data: { cards },
+    });
+  } catch (error) {
+    console.error("Get cards error:", error?.message || error);
+    return sendFailure(res, 500, "Could not load saved cards.");
+  }
+};
+
+export const deleteMyCard = async (req, res) => {
+  try {
+    const customer = await assertCardBelongsTo(
+      res,
+      req.user,
+      req.params.paymentMethodId
+    );
+    if (!customer) return;
+    await getStripe().paymentMethods.detach(req.params.paymentMethodId);
+    return res.status(200).json({
+      success: true,
+      message: "Card removed.",
+      data: {},
+    });
+  } catch (error) {
+    console.error("Delete card error:", error?.message || error);
+    return sendFailure(res, 500, "Could not remove the card.");
+  }
+};
+
+export const setDefaultCard = async (req, res) => {
+  try {
+    const customer = await assertCardBelongsTo(
+      res,
+      req.user,
+      req.params.paymentMethodId
+    );
+    if (!customer) return;
+    await getStripe().customers.update(customer.id, {
+      invoice_settings: {
+        default_payment_method: req.params.paymentMethodId,
+      },
+    });
+    return res.status(200).json({
+      success: true,
+      message: "Default card updated.",
+      data: {},
+    });
+  } catch (error) {
+    console.error("Set default card error:", error?.message || error);
+    return sendFailure(res, 500, "Could not set the default card.");
+  }
+};
+
 export const createWalletTopup = async (req, res) => {
   try {
     const amount = asMoney(req.body?.amount);
@@ -822,12 +1012,25 @@ export const createWalletTopup = async (req, res) => {
       );
     }
     const wallet = await getOrCreateWallet(req.user._id);
+    const savedCardId = (req.body?.savedCardId || "").toString().trim();
+    let stripeCustomer = null;
+    if (savedCardId) {
+      stripeCustomer = await assertCardBelongsTo(res, req.user, savedCardId);
+      if (!stripeCustomer) return;
+    }
     const paymentIntent = await getStripe().paymentIntents.create({
       amount: Math.round(amount * 100),
       currency: "gbp",
       metadata: { type: "wallet_topup", userId: req.user._id.toString() },
       description: "owvo wallet top-up",
-      automatic_payment_methods: { enabled: true },
+      ...(savedCardId
+        ? {
+            customer: stripeCustomer.id,
+            payment_method: savedCardId,
+            off_session: true,
+            confirm: true,
+          }
+        : { automatic_payment_methods: { enabled: true } }),
     });
     await WalletTransaction.create({
       wallet: wallet._id,
@@ -838,6 +1041,25 @@ export const createWalletTopup = async (req, res) => {
       status: "pending",
       stripePaymentIntentId: paymentIntent.id,
     });
+    if (savedCardId && paymentIntent.status === "succeeded") {
+      await creditWalletTopup(paymentIntent);
+      return res.status(200).json({
+        success: true,
+        message: "Wallet topped up",
+        data: { completed: true, paymentIntentId: paymentIntent.id },
+      });
+    }
+    if (
+      savedCardId &&
+      paymentIntent.status !== "requires_action" &&
+      paymentIntent.status !== "processing"
+    ) {
+      return sendFailure(
+        res,
+        402,
+        "Your saved card could not be charged. Please try another card."
+      );
+    }
     return res.status(200).json({
       success: true,
       message: "Top-up started.",

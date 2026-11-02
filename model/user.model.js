@@ -276,6 +276,11 @@ const userSchema = new Schema(
 
     // Payout ka tarika: "auto" = Stripe Connect automatic jahan
     // mumkin ho; "manual" = sirf admin ke bank transfer se.
+    // Saved cards (Stripe customer) — card save karne par banta hai.
+    stripeCustomerId: {
+      type: String,
+      default: "",
+    },
     payoutMode: {
       type: String,
       enum: ["auto", "manual"],
