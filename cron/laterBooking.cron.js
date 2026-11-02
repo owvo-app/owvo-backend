@@ -1,6 +1,7 @@
 import cron from "node-cron";
 import { Booking } from "../model/booking.model.js";
 import { notifyUser } from "../utils/fcm.util.js";
+import { emitToUser } from "../socket/socket.js";
 import { formatLondonDateTime } from "../utils/laterBooking.util.js";
 
 // Book for Later ki waqt wali zimmedariyan — har 5 minute:
@@ -164,6 +165,16 @@ export const laterBookingCron = () => {
             type: "later_booking_upcoming",
             bookingId: booking._id.toString(),
           },
+        });
+        // Live ishara: provider ki app khuli ho to andar bhi pata chale —
+        // sirf push par inhisaar nahi. Yeh koi nayi request NAHI hai;
+        // app isay aik اطلاع wali patti ki tarah dikhati hai.
+        emitToUser(booking.provider.toString(), "later_booking_live_soon", {
+          bookingId: booking._id.toString(),
+          scheduledAt:
+            (booking.scheduledAt || booking.bookingDate)?.toISOString?.() ||
+            null,
+          message: `You have a scheduled wash at ${when}. Please be ready.`,
         });
       }
     } catch (error) {
