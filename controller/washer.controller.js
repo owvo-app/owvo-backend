@@ -507,6 +507,20 @@ export const acceptBooking = catchAsync(async (req, res) => {
     );
   }
 
+  // Adaigi ke baghair wash shuru/mukammal NAHI ho sakta — provider
+  // kisi bhi screen se unpaid booking ko aagay na barha sake.
+  // (£0 wali booking — maslan 100% coupon — is se mustasna hai.)
+  if (
+    (status === "ongoing" || status === "completed") &&
+    booking.payment?.status !== "paid" &&
+    Number(booking.finalPrice || 0) > 0
+  ) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "Customer has not paid for this booking yet"
+    );
+  }
+
   const activeBooking = await refreshProviderBusyState(washer);
   if (
     providerBusyStatuses.includes(status) &&
@@ -979,6 +993,17 @@ export const completeWash = catchAsync(async (req, res) => {
     throw new AppError(
       httpStatus.BAD_REQUEST,
       "Only an in-progress wash can be completed"
+    );
+  }
+
+  // Adaigi ke baghair wash mukammal NAHI ho sakta.
+  if (
+    booking.payment?.status !== "paid" &&
+    Number(booking.finalPrice || 0) > 0
+  ) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "Customer has not paid for this booking yet"
     );
   }
 

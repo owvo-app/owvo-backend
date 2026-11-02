@@ -605,8 +605,33 @@ export const updateBookingStatus = catchAsync(async (req, res) => {
         "Booking cannot be marked arrived from its current status"
       );
     }
+    // Safar/arrival adaigi ke BAAD hai — unpaid booking par
+    // customer "arrived" nahi ho sakta (£0 wali booking mustasna).
+    if (
+      booking.payment?.status !== "paid" &&
+      Number(booking.finalPrice || 0) > 0 &&
+      !isAdmin
+    ) {
+      throw new AppError(
+        httpStatus.BAD_REQUEST,
+        "Customer has not paid for this booking yet"
+      );
+    }
   } else if (!isProvider && !isAdmin) {
     throw new AppError(httpStatus.FORBIDDEN, "Access denied");
+  }
+
+  // Adaigi ke baghair wash shuru/mukammal NAHI ho sakta.
+  if (
+    (status === "ongoing" || status === "completed") &&
+    booking.payment?.status !== "paid" &&
+    Number(booking.finalPrice || 0) > 0 &&
+    !isAdmin
+  ) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "Customer has not paid for this booking yet"
+    );
   }
 
   booking.status = status;
