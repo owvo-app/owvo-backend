@@ -122,6 +122,24 @@ import {
   updateUserAccountStatus,
 } from "../controller/admin.controller.js";
 import { protect, isAdmin, isDashboardUser, hasDashboardMenu } from "../middleware/auth.middleware.js";
+import {
+  getAnalyticsOverview,
+  getAnalyticsTrend,
+  getAnalyticsBookings,
+  getAnalyticsRevenue,
+  getAnalyticsProviders,
+  getAnalyticsCustomers,
+  getAnalyticsServices,
+  getAnalyticsFinancial,
+  generateAnalyticsReport,
+  listAnalyticsReports,
+  downloadAnalyticsReport,
+  previewAnalyticsReport,
+  renameAnalyticsReport,
+  duplicateAnalyticsReport,
+  deleteAnalyticsReport,
+  exportAnalyticsTab,
+} from "../controller/analytics.controller.js";
 import { uploadVideo } from "../middleware/uploadVideo.middleware.js";
 import {
   getAdminDataRequests,
@@ -194,6 +212,25 @@ router.delete("/addons/:addonId", protect, isAdmin, deleteAdminAddon);
 router.get("/payments", protect, hasDashboardMenu("payouts-payments"), getAdminPayments);
 router.get("/earnings", protect, hasDashboardMenu("earnings"), getAdminEarnings);
 router.get("/earnings/export", protect, hasDashboardMenu("earnings"), exportAdminEarningsCsv);
+
+// ─── Reports & Analytics (menu: reports) ───
+const repGuard = [protect, hasDashboardMenu("reports")];
+router.get("/analytics/overview", ...repGuard, getAnalyticsOverview);
+router.get("/analytics/trend", ...repGuard, getAnalyticsTrend);
+router.get("/analytics/bookings", ...repGuard, getAnalyticsBookings);
+router.get("/analytics/revenue", ...repGuard, getAnalyticsRevenue);
+router.get("/analytics/providers", ...repGuard, getAnalyticsProviders);
+router.get("/analytics/customers", ...repGuard, getAnalyticsCustomers);
+router.get("/analytics/services", ...repGuard, getAnalyticsServices);
+router.get("/analytics/financial", ...repGuard, getAnalyticsFinancial);
+router.get("/analytics/export", ...repGuard, exportAnalyticsTab);
+router.post("/analytics/reports/generate", ...repGuard, generateAnalyticsReport);
+router.get("/analytics/reports", ...repGuard, listAnalyticsReports);
+router.get("/analytics/reports/:id/download", ...repGuard, downloadAnalyticsReport);
+router.get("/analytics/reports/:id/preview", ...repGuard, previewAnalyticsReport);
+router.patch("/analytics/reports/:id", ...repGuard, renameAnalyticsReport);
+router.post("/analytics/reports/:id/duplicate", ...repGuard, duplicateAnalyticsReport);
+router.delete("/analytics/reports/:id", protect, hasDashboardMenu("reports"), isAdmin, deleteAnalyticsReport);
 router.get("/earnings/adjustments", protect, hasDashboardMenu("earnings"), getEarningAdjustments);
 router.post("/earnings/adjustments", protect, isAdmin, createEarningAdjustment);
 router.post("/bookings/:id/hold-earnings", protect, isAdmin, holdBookingEarning);
