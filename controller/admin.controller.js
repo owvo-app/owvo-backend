@@ -591,6 +591,7 @@ export const getDashboardOverview = catchAsync(async (req, res) => {
     activeWashers,
     pendingReports,
     completedBookingsForPayout,
+    totalCommissionAgg,
   ] = await Promise.all([
     Booking.aggregate([
       { $match: { status: "completed", ...completedDateFilter } },
@@ -616,6 +617,25 @@ export const getDashboardOverview = catchAsync(async (req, res) => {
       ...dateFilter("createdAt", req.query),
     }),
     Booking.find({ status: "completed", ...completedDateFilter }).select("finalPrice").lean(),
+    Booking.aggregate([
+      { $match: { status: "completed", ...completedDateFilter } },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: {
+              $ifNull: [
+                "$commissionAmount",
+                {
+                  $multiply: [
+                    "$finalPrice",
+                    { $ifNull: ["$commissionRate", commissionRate] },
+                  ],
+                },
+              ],
+            } },
+        },
+      },
+    ]),
   ]);
 
   const totalRevenue = asMoney(totalRevenueAgg[0]?.total);
@@ -638,7 +658,10 @@ export const getDashboardOverview = catchAsync(async (req, res) => {
       pendingPayoutProviders += 1;
     }
   }
-  const platformBalance = asMoney(totalRevenue * commissionRate);
+  // Platform balance = har booking ki ASAL (snapshot) commission ka
+  // jama — kul revenue x aaj ka rate nahi, warna rate badalne se
+  // purani kamai bhi badli hui nazar ayegi.
+  const platformBalance = asMoney(totalCommissionAgg[0]?.total || 0);
 
   sendResponse(res, {
     statusCode: httpStatus.OK,
@@ -1284,6 +1307,8 @@ export const createAdminBooking = catchAsync(async (req, res) => {
     user: customerId,
     provider: providerId,
     service: serviceId,
+    // Commission rate booking ke banne par fix (customer flow jaisa).
+    commissionRate: await getCurrentCommissionRate(),
     ...(vehicleDoc ? { vehicle: vehicleDoc._id } : {}),
     ...(vehicleSnapshot ? { vehicleSnapshot } : {}),
     addons,
@@ -2336,7 +2361,27 @@ export const getAdminProviderDetail = catchAsync(async (req, res) => {
           completedAt: { $gte: todayStart },
         },
       },
-      { $group: { _id: null, total: { $sum: "$finalPrice" } } },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: {
+              $ifNull: [
+                "$providerNetAmount",
+                {
+                  $multiply: [
+                    "$finalPrice",
+                    {
+                      $subtract: [
+                        1,
+                        { $ifNull: ["$commissionRate", commissionRate] },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            } },
+        },
+      },
     ]),
     Booking.aggregate([
       {
@@ -2346,7 +2391,27 @@ export const getAdminProviderDetail = catchAsync(async (req, res) => {
           completedAt: { $gte: weekStart },
         },
       },
-      { $group: { _id: null, total: { $sum: "$finalPrice" } } },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: {
+              $ifNull: [
+                "$providerNetAmount",
+                {
+                  $multiply: [
+                    "$finalPrice",
+                    {
+                      $subtract: [
+                        1,
+                        { $ifNull: ["$commissionRate", commissionRate] },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            } },
+        },
+      },
     ]),
     paymentInfo.aggregate([
       {
@@ -2507,8 +2572,8 @@ export const getAdminProviderDetail = catchAsync(async (req, res) => {
       earnings: {
         totalGross: r2(lifetimeGross),
         totalEarnings,
-        todayNet: r2((todayAgg[0]?.total || 0) * (1 - commissionRate)),
-        weekNet: r2((weekAgg[0]?.total || 0) * (1 - commissionRate)),
+        todayNet: r2(todayAgg[0]?.total || 0),
+        weekNet: r2(weekAgg[0]?.total || 0),
         tipsTotal,
         paidOut,
         pendingPayouts,
@@ -4399,7 +4464,7 @@ const buildEarningEntries = async (query = {}) => {
       booking.providerNetAmount !== undefined;
     const entryCommission = hasSnapshot
       ? asMoney(booking.commissionAmount)
-      : asMoney(grossAmount * commissionRate);
+      : asMoney(grossAmount * (booking.commissionRate ?? commissionRate));
     const netAmount = hasSnapshot
       ? asMoney(booking.providerNetAmount)
       : asMoney(grossAmount - entryCommission);
@@ -4429,7 +4494,7 @@ const buildEarningEntries = async (query = {}) => {
       provider: booking.provider,
       service: booking.service,
       grossAmount,
-      commissionRate: hasSnapshot ? booking.commissionRate : commissionRate,
+      commissionRate: booking.commissionRate ?? commissionRate,
       hasSnapshot,
       commissionAmount: entryCommission,
       netAmount,
@@ -4695,6 +4760,19 @@ export const getAdminPayouts = catchAsync(async (req, res) => {
         $group: {
           _id: "$provider",
           grossAmount: { $sum: "$finalPrice" },
+          commissionTotal: {
+            $sum: {
+              $ifNull: [
+                "$commissionAmount",
+                {
+                  $multiply: [
+                    "$finalPrice",
+                    { $ifNull: ["$commissionRate", commissionRate] },
+                  ],
+                },
+              ],
+            },
+          },
           jobs: { $sum: 1 },
         },
       },
@@ -4749,7 +4827,7 @@ export const getAdminPayouts = catchAsync(async (req, res) => {
   const providerBalances = earningsData.map((entry) => {
     const providerId = entry._id?.toString();
     const grossAmount = asMoney(entry.grossAmount);
-    const commissionAmount = asMoney(grossAmount * commissionRate);
+    const commissionAmount = asMoney(entry.commissionTotal || 0);
     const netAmount = asMoney(grossAmount - commissionAmount);
     const payoutTotals = payoutBalanceMap.get(providerId) || {
       paidOut: 0,
@@ -5023,11 +5101,41 @@ export const getAdminCommissionWithdrawals = catchAsync(async (req, res) => {
   ] = await Promise.all([
     Booking.aggregate([
       { $match: { status: "completed", ...dateFilter("completedAt", req.query) } },
-      { $group: { _id: null, total: { $sum: "$finalPrice" } } },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: {
+              $ifNull: [
+                "$commissionAmount",
+                {
+                  $multiply: [
+                    "$finalPrice",
+                    { $ifNull: ["$commissionRate", commissionRate] },
+                  ],
+                },
+              ],
+            } },
+        },
+      },
     ]),
     Booking.aggregate([
       { $match: { status: "completed" } },
-      { $group: { _id: null, total: { $sum: "$finalPrice" } } },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: {
+              $ifNull: [
+                "$commissionAmount",
+                {
+                  $multiply: [
+                    "$finalPrice",
+                    { $ifNull: ["$commissionRate", commissionRate] },
+                  ],
+                },
+              ],
+            } },
+        },
+      },
     ]),
     AdminWithdrawal.aggregate([
       { $match: { status: { $ne: "failed" }, ...withdrawalRangeFilter } },
@@ -5045,8 +5153,8 @@ export const getAdminCommissionWithdrawals = catchAsync(async (req, res) => {
     getStripeBalanceSnapshot(),
   ]);
 
-  const periodCommission = asMoney((periodCompletedAgg[0]?.total || 0) * commissionRate);
-  const allCommission = asMoney((allCompletedAgg[0]?.total || 0) * commissionRate);
+  const periodCommission = asMoney(periodCompletedAgg[0]?.total || 0);
+  const allCommission = asMoney(allCompletedAgg[0]?.total || 0);
   const periodWithdrawn = asMoney(periodWithdrawnAgg[0]?.total);
   const allWithdrawn = asMoney(allWithdrawnAgg[0]?.total);
 
@@ -5086,7 +5194,7 @@ export const createAdminCommissionWithdrawal = catchAsync(async (req, res) => {
 
   const [completedForCommission, allWithdrawnAgg] = await Promise.all([
     Booking.find({ status: "completed" })
-      .select("finalPrice commissionAmount")
+      .select("finalPrice commissionAmount commissionRate")
       .lean(),
     AdminWithdrawal.aggregate([
       { $match: { status: { $ne: "failed" } } },
@@ -5102,7 +5210,11 @@ export const createAdminCommissionWithdrawal = catchAsync(async (req, res) => {
         (booking.commissionAmount !== null &&
         booking.commissionAmount !== undefined
           ? Number(booking.commissionAmount) || 0
-          : (Number(booking.finalPrice) || 0) * commissionRate),
+          : (Number(booking.finalPrice) || 0) *
+            (booking.commissionRate !== null &&
+            booking.commissionRate !== undefined
+              ? Number(booking.commissionRate)
+              : commissionRate)),
       0
     )
   );

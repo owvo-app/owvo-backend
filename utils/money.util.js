@@ -33,11 +33,23 @@ export const getCurrentCommissionRate = async () => {
 // BAAD complete hone wali bookings par hoga.
 export const applyCommissionSnapshot = async (booking, knownRate) => {
   if (!booking) return booking;
-  if (booking.commissionRate !== null && booking.commissionRate !== undefined) {
+  const hasRate =
+    booking.commissionRate !== null && booking.commissionRate !== undefined;
+  const hasAmounts =
+    booking.commissionAmount !== null &&
+    booking.commissionAmount !== undefined &&
+    booking.providerNetAmount !== null &&
+    booking.providerNetAmount !== undefined;
+  if (hasRate && hasAmounts) {
     return booking;
   }
-  const rate =
-    knownRate !== undefined && knownRate !== null
+  // Booking par rate pehle se fix hai (creation ke waqt laga tha) to
+  // rakam hamesha USI rate se kategi — current settings ka rate yahan
+  // kabhi istemal nahi hoga, warna admin ka rate change purani
+  // (pending/completed) bookings ka hisaab badal dega.
+  const rate = hasRate
+    ? Number(booking.commissionRate)
+    : knownRate !== undefined && knownRate !== null
       ? Number(knownRate)
       : await getCurrentCommissionRate();
   const gross = asMoney(booking.finalPrice || booking.price || 0);
@@ -57,7 +69,13 @@ export const bookingNetAmount = (booking, fallbackRate) => {
     return asMoney(booking.providerNetAmount);
   }
   const gross = asMoney(booking?.finalPrice || booking?.price || 0);
-  return asMoney(gross * (1 - fallbackRate));
+  // Amounts na bane hon to bhi booking ka APNA fix rate pehle —
+  // current rate sirf un purani bookings ke liye jinka rate hi nahi.
+  const ownRate =
+    booking?.commissionRate !== null && booking?.commissionRate !== undefined
+      ? Number(booking.commissionRate)
+      : null;
+  return asMoney(gross * (1 - (ownRate !== null ? ownRate : fallbackRate)));
 };
 
 export const getProviderTipsTotal = async (providerId) => {

@@ -5,6 +5,9 @@
 //
 // 1) Purani completed bookings par commission snapshot — us rate
 //    par jo is waqt database me hai (live rate).
+// 1b) Ghair-completed (pending/accepted waghera) bookings par
+//     sirf RATE fix — amounts completion par in ke apne rate se
+//     katengi, taake rate change in ko bhi na badal sake.
 // 2) Jin payments/payouts par TXN number nahi, un ko number
 //    (sab se purane pehle, taake tartib durust rahe).
 // 3) Purane booking.refund records ko naye Refund ledger me
@@ -44,6 +47,19 @@ const main = async () => {
   log(`Snapshot backfill @ ${(rate * 100).toFixed(0)}%: ${unsnapped.length} bookings`);
   for (const booking of unsnapped) {
     await applyCommissionSnapshot(booking, rate);
+    if (!dryRun) await booking.save();
+  }
+
+  // ── 1b) Ghair-completed bookings par sirf rate fix ────────────
+  const unratedOpen = await Booking.find({
+    status: { $ne: "completed" },
+    $or: [{ commissionRate: null }, { commissionRate: { $exists: false } }],
+  });
+  log(
+    `Open bookings rate-fix @ ${(rate * 100).toFixed(0)}%: ${unratedOpen.length} bookings`
+  );
+  for (const booking of unratedOpen) {
+    booking.commissionRate = rate;
     if (!dryRun) await booking.save();
   }
 

@@ -3,7 +3,10 @@ import mongoose from "mongoose";
 import AppError from "../errors/AppError.js";
 import { Addon } from "../model/addon.model.js";
 import { Booking } from "../model/booking.model.js";
-import { applyCommissionSnapshot } from "../utils/money.util.js";
+import {
+  applyCommissionSnapshot,
+  getCurrentCommissionRate,
+} from "../utils/money.util.js";
 import { Coupon } from "../model/coupon.model.js";
 import { Receipt } from "../model/receipt.model.js";
 import { Service } from "../model/service.model.js";
@@ -347,11 +350,16 @@ export const createBooking = catchAsync(async (req, res) => {
     appliedCoupon = coupon._id;
   }
 
+  // Commission ka rate booking ke BANNE ke waqt fix kar do — is ke
+  // baad admin rate badle bhi to is booking ka hisaab nahi badlega.
+  const commissionRateAtCreation = await getCurrentCommissionRate();
+
   const booking = await Booking.create({
     user: userId,
     provider,
     service,
     price,
+    commissionRate: commissionRateAtCreation,
     addons: selectedAddons.map((addon) => ({
       addon: addon._id,
       name: addon.name,
@@ -1132,12 +1140,13 @@ export const rebookBooking = catchAsync(async (req, res) => {
     appliedCoupon = coupon._id;
   }
 
-  // 1) Create new booking
+  // 1) Create new booking (rebook = NAYI booking, rate aaj ka fix)
   const createdBooking = await Booking.create({
     user: userId,
     provider,
     service,
     price,
+    commissionRate: await getCurrentCommissionRate(),
     vehicle: prev.vehicle || null,
     vehicleSnapshot: prev.vehicleSnapshot,
     coupon: appliedCoupon,

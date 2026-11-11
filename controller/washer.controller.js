@@ -2305,7 +2305,7 @@ export const getWalletEarnings = catchAsync(async (req, res) => {
       booking.providerNetAmount !== undefined;
     const commissionAmount = hasSnapshot
       ? asMoney(booking.commissionAmount)
-      : asMoney(gross * commissionRate);
+      : asMoney(gross * (booking.commissionRate ?? commissionRate));
     const providerEarning = hasSnapshot
       ? asMoney(booking.providerNetAmount)
       : asMoney(gross - commissionAmount);
@@ -2396,7 +2396,7 @@ export const emailWalletStatement = catchAsync(async (req, res) => {
         booking.providerNetAmount !== undefined;
       const commission = hasSnapshot
         ? asMoney(booking.commissionAmount)
-        : asMoney(gross * commissionRate);
+        : asMoney(gross * (booking.commissionRate ?? commissionRate));
       const net = hasSnapshot
         ? asMoney(booking.providerNetAmount)
         : asMoney(gross - commission);
