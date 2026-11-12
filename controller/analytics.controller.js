@@ -387,13 +387,13 @@ export const getAnalyticsOverview = catchAsync(async (req, res) => {
   const topProviderUsers = await User.find({
     _id: { $in: topProviderRows.map((r) => r._id) },
   })
-    .select("fullName profileImage")
+    .select("fullName name profileImage")
     .lean();
   const tpMap = new Map(topProviderUsers.map((u) => [String(u._id), u]));
   const topProviders = topProviderRows.map((r) => ({
     providerId: String(r._id),
     number: numbers.get(String(r._id)) || "",
-    name: tpMap.get(String(r._id))?.fullName || "Provider",
+    name: dispName(tpMap.get(String(r._id)), "Provider"),
     profileImage: tpMap.get(String(r._id))?.profileImage || "",
     earnings: asMoney(r.net),
     jobs: r.jobs,
@@ -617,8 +617,8 @@ export const getAnalyticsBookings = catchAsync(async (req, res) => {
       byWeekday,
       recentCancellations: recentCancellations.map((b) => ({
         id: String(b._id),
-        customer: b.user?.fullName || "Customer",
-        provider: b.provider?.fullName || "Provider",
+        customer: dispName(b.user, "Customer"),
+        provider: dispName(b.provider, "Provider"),
         service: b.service?.title || "Service",
         amount: asMoney(b.finalPrice),
         at: b.updatedAt,
@@ -918,7 +918,7 @@ export const getAnalyticsProviders = catchAsync(async (req, res) => {
   );
   const decidedMap = new Map(decidedRows.map((r) => [String(r._id), r]));
   const users = await User.find({ _id: { $in: jobRows.map((r) => r._id) } })
-    .select("fullName profileImage isOnline accountStatus")
+    .select("fullName name profileImage isOnline accountStatus")
     .lean();
   const uMap = new Map(users.map((u) => [String(u._id), u]));
 
@@ -928,7 +928,7 @@ export const getAnalyticsProviders = catchAsync(async (req, res) => {
     return {
       providerId: id,
       number: numbers.get(id) || "",
-      name: uMap.get(id)?.fullName || "Provider",
+      name: dispName(uMap.get(id), "Provider"),
       profileImage: uMap.get(id)?.profileImage || "",
       isOnline: !!uMap.get(id)?.isOnline,
       accountStatus: uMap.get(id)?.accountStatus || "active",
@@ -1031,12 +1031,12 @@ export const getAnalyticsCustomers = catchAsync(async (req, res) => {
     : null;
 
   const users = await User.find({ _id: { $in: topRows.map((r) => r._id) } })
-    .select("fullName profileImage createdAt")
+    .select("fullName name profileImage createdAt")
     .lean();
   const uMap = new Map(users.map((u) => [String(u._id), u]));
   const topCustomers = topRows.map((r) => ({
     customerId: String(r._id),
-    name: uMap.get(String(r._id))?.fullName || "Customer",
+    name: dispName(uMap.get(String(r._id)), "Customer"),
     profileImage: uMap.get(String(r._id))?.profileImage || "",
     bookings: r.bookings,
     spent: asMoney(r.spent),
@@ -1287,6 +1287,7 @@ const dateStr = (d) =>
       })
     : "—";
 const shortBookingId = (id) => `#B${String(id).slice(-6).toUpperCase()}`;
+const dispName = (u, fallback) => u?.fullName || u?.name || fallback;
 const bucketLabel = (dateStrValue, groupBy) => {
   if (groupBy === "month") return dateStrValue.slice(0, 7);
   if (groupBy === "week") {
@@ -1335,7 +1336,7 @@ const buildReportData = async ({ type, groupBy = "day", range, filters = {} }) =
         { $sort: { net: -1 } },
       ]);
       const users = await User.find({ _id: { $in: rows.map((r) => r._id) } })
-        .select("fullName")
+        .select("fullName name")
         .lean();
       const m = new Map(users.map((u) => [String(u._id), u.fullName]));
       return {
@@ -1348,7 +1349,7 @@ const buildReportData = async ({ type, groupBy = "day", range, filters = {} }) =
           { key: "net", label: "Provider Net" },
         ],
         rows: rows.map((r) => ({
-          provider: m.get(String(r._id)) || "Provider",
+          provider: dispName(m.get(String(r._id)), "Provider"),
           jobs: r.jobs,
           gross: moneyStr(r.gross),
           commission: moneyStr(r.commission),
@@ -1524,7 +1525,7 @@ const buildReportData = async ({ type, groupBy = "day", range, filters = {} }) =
       rows: docs.map((p) => ({
         txn: p.txnNumber || "—",
         provider: `${numbers.get(String(p.provider?._id || p.provider)) || ""} ${
-          p.provider?.fullName || "Provider"
+          dispName(p.provider, "Provider")
         }`.trim(),
         amount: moneyStr(p.amount),
         status: p.status,
@@ -1561,8 +1562,8 @@ const buildReportData = async ({ type, groupBy = "day", range, filters = {} }) =
       rows: docs.map((r) => ({
         txn: r.txnNumber || "—",
         booking: r.booking ? shortBookingId(r.booking) : "—",
-        customer: r.user?.fullName || "Customer",
-        provider: r.provider?.fullName || "Provider",
+        customer: dispName(r.user, "Customer"),
+        provider: dispName(r.provider, "Provider"),
         amount: moneyStr(r.amount),
         status: r.status,
         reason: r.reason || "—",
@@ -1602,8 +1603,8 @@ const buildReportData = async ({ type, groupBy = "day", range, filters = {} }) =
       rows: docs.map((b) => ({
         booking: shortBookingId(b._id),
         date: dateStr(b.createdAt),
-        customer: b.user?.fullName || "Customer",
-        provider: b.provider?.fullName || "Provider",
+        customer: dispName(b.user, "Customer"),
+        provider: dispName(b.provider, "Provider"),
         service: b.service?.title || "Service",
         type: b.bookingType === "later" ? "Later" : "Now",
         status: b.status,
@@ -1701,7 +1702,7 @@ const buildReportData = async ({ type, groupBy = "day", range, filters = {} }) =
         { key: "lastBooking", label: "Last Booking" },
       ],
       rows: rows.map((r) => ({
-        customer: m.get(String(r._id))?.fullName || "Customer",
+        customer: dispName(m.get(String(r._id)), "Customer"),
         email: m.get(String(r._id))?.email || "—",
         joined: dateStr(m.get(String(r._id))?.createdAt),
         bookings: r.bookings,
@@ -1894,7 +1895,11 @@ const serializeReport = (doc, userName) => ({
   sizeBytes: doc.sizeBytes,
   rowCount: doc.rowCount,
   generatedBy:
-    doc.generatedBy?.fullName || userName || doc.generatedBy || null,
+    (doc.generatedBy && typeof doc.generatedBy === "object"
+      ? doc.generatedBy.fullName || doc.generatedBy.name || null
+      : null) ||
+    userName ||
+    null,
   createdAt: doc.createdAt,
 });
 
@@ -1919,7 +1924,7 @@ export const generateAnalyticsReport = catchAsync(async (req, res) => {
   const rangeLabel = rangeLabelOf(range);
   const meta = `${rangeLabel} · Generated ${new Date().toLocaleString("en-GB", {
     timeZone: "Europe/London",
-  })} by ${req.user?.fullName || "Admin"}`;
+  })} by ${req.user?.fullName || req.user?.name || "Admin"}`;
   const buffer = await buildFile(format, { ...data, meta });
   const name = `${data.title} (${rangeLabel})`;
   const rec = await GeneratedReport.create({
@@ -1947,7 +1952,7 @@ export const generateAnalyticsReport = catchAsync(async (req, res) => {
     statusCode: httpStatus.CREATED,
     success: true,
     message: "Report generated",
-    data: serializeReport(rec, req.user?.fullName),
+    data: serializeReport(rec, req.user?.fullName || req.user?.name),
   });
 });
 
@@ -1965,7 +1970,7 @@ export const listAnalyticsReports = catchAsync(async (req, res) => {
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit)
-      .populate("generatedBy", "fullName")
+      .populate("generatedBy", "fullName name")
       .lean(),
     GeneratedReport.countDocuments(filter),
   ]);
@@ -2064,7 +2069,7 @@ export const renameAnalyticsReport = catchAsync(async (req, res) => {
     req.params.id,
     { name },
     { new: true }
-  ).populate("generatedBy", "fullName");
+  ).populate("generatedBy", "fullName name");
   if (!doc) throw new AppError(httpStatus.NOT_FOUND, "Report not found");
   return sendResponse(res, {
     statusCode: httpStatus.OK,
@@ -2096,7 +2101,7 @@ export const duplicateAnalyticsReport = catchAsync(async (req, res) => {
     statusCode: httpStatus.CREATED,
     success: true,
     message: "Report duplicated",
-    data: serializeReport(copy, req.user?.fullName),
+    data: serializeReport(copy, req.user?.fullName || req.user?.name),
   });
 });
 
