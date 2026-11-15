@@ -781,7 +781,7 @@ export const getTrackingLive = catchAsync(async (req, res) => {
       .populate("service", "_id title")
       .sort({ createdAt: -1 })
       .lean(),
-    User.countDocuments({ role: "provider", isOnline: true }),
+    User.distinct("_id", { role: "provider", isOnline: true }),
     User.countDocuments({ role: "provider" }),
     Booking.countDocuments({ status: "ongoing" }),
     Booking.countDocuments({
@@ -815,10 +815,10 @@ export const getTrackingLive = catchAsync(async (req, res) => {
       // Washer — FIXED driveway (client: washer live movement track nahi karni)
       washerName: p.name || "—",
       washerPhone: p.phoneNumber || "",
-      washerStatus: !p.isOnline
-        ? "offline"
-        : busyProviderIds.has(providerId)
-          ? "busy"
+      washerStatus: busyProviderIds.has(providerId)
+        ? "busy"
+        : !p.isOnline
+          ? "offline"
           : "online",
       drivewayLat: Array.isArray(coords) ? coords[1] : null,
       drivewayLng: Array.isArray(coords) ? coords[0] : null,
@@ -841,9 +841,14 @@ export const getTrackingLive = catchAsync(async (req, res) => {
     };
   });
 
-  const online = washersOnline;
-  const busy = providersWithActiveBooking.length;
-  const offline = Math.max(totalProviders - online, 0);
+  // Provider status is an exclusive split: Busy = has an active booking,
+  // Online = online and not busy, Offline = everyone else. The three
+  // always add up to totalProviders.
+  const busy = busyProviderIds.size;
+  const online = washersOnline.filter(
+    (id) => !busyProviderIds.has(String(id))
+  ).length;
+  const offline = Math.max(totalProviders - online - busy, 0);
 
   // Top areas — aaj ki bookings, postalCode area se group
   const todayBookings = await Booking.find({ createdAt: { $gte: todayStart } })
