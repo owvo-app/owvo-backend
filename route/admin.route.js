@@ -125,6 +125,7 @@ import {
   updateStaffAccount,
   updateUserAccountStatus,
 } from "../controller/admin.controller.js";
+import { getAdminNotificationsFeed } from "../controller/notificationFeed.controller.js";
 import { protect, isAdmin, isDashboardUser, hasDashboardMenu, hasDashboardMenuAny } from "../middleware/auth.middleware.js";
 import {
   getAnalyticsOverview,
@@ -264,7 +265,7 @@ router.get("/reconciliation", protect, hasDashboardMenu("payouts-payments"), get
 router.get("/commission-withdrawals", protect, hasDashboardMenu("payouts-payments"), getAdminCommissionWithdrawals);
 router.post("/commission-withdrawals", protect, isAdmin, createAdminCommissionWithdrawal);
 
-router.get("/notifications", protect, hasDashboardMenu("notifications"), getAdminNotifications);
+router.get("/notifications", protect, hasDashboardMenu("notifications"), getAdminNotificationsFeed);
 router.get("/settings", protect, hasDashboardMenu("settings"), getDashboardSettings);
 router.patch("/settings", protect, isAdmin, updateDashboardSettings);
 
