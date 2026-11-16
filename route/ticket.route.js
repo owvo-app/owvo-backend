@@ -1,5 +1,6 @@
 import express from "express";
 import { protect } from "../middleware/auth.middleware.js";
+import { upload } from "../middleware/upload.middleware.js";
 import {
   createTicket,
   getMyTickets,
@@ -12,6 +13,6 @@ const router = express.Router();
 router.post("/", protect, createTicket);
 router.get("/", protect, getMyTickets);
 router.get("/:id", protect, getMyTicketById);
-router.post("/:id/messages", protect, replyToTicket);
+router.post("/:id/messages", protect, upload.single("document"), replyToTicket);
 
 export default router;

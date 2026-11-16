@@ -6581,7 +6581,7 @@ const REFUND_REASON_CATEGORIES = [
 // Cumulative cap: pehle hue refunds ke baad bachi raqam se zyada
 // kabhi refund nahi hota. Stripe fail ho to record "approved" par
 // ruk jata hai taake admin dobara koshish kar sake.
-const executeRefund = async (refund, actorId) => {
+export const executeRefund = async (refund, actorId) => {
   const booking = await Booking.findById(refund.booking);
   if (!booking) {
     throw new AppError(httpStatus.NOT_FOUND, "Booking not found for this refund.");

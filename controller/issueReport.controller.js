@@ -6,6 +6,70 @@ import sendResponse from "../utils/sendResponse.js";
 import { Booking } from "../model/booking.model.js";
 import { IssueReport } from "../model/issueReport.model.js";
 import { uploadOnCloudinary } from "../utils/common.Method.js";
+import { SupportTicket } from "../model/supportTicket.model.js";
+import { broadcast } from "../socket/socket.js";
+
+// One-queue model: a booking "Report an Issue" also becomes a Support
+// Ticket, so it lands in Support & Disputes with a conversation and —
+// for disputes — the money-outcome workflow. Report type → ticket type.
+const REPORT_TO_TICKET_TYPE = {
+  payment: "payment",
+  service_quality: "complaint",
+  safety: "dispute",
+  provider_conduct: "dispute",
+  general: "complaint",
+};
+const REPORT_TYPE_LABEL = {
+  payment: "Payment issue",
+  service_quality: "Service quality",
+  safety: "Safety concern",
+  provider_conduct: "Provider conduct",
+  general: "Issue report",
+};
+
+const mirrorReportToTicket = async (report, req) => {
+  try {
+    const messages = [];
+    if (report.photo?.url) {
+      messages.push({
+        sender: req.user._id,
+        senderRole: req.user.role === "provider" ? "provider" : "customer",
+        text: "Photo evidence attached",
+        attachment: {
+          url: report.photo.url,
+          type: "image",
+          name: "report-photo",
+          mimeType: "image/*",
+          size: 0,
+        },
+      });
+    }
+    const ticket = await SupportTicket.create({
+      subject: `${REPORT_TYPE_LABEL[report.type] || "Issue report"} — booking report`,
+      description: report.description,
+      type: REPORT_TO_TICKET_TYPE[report.type] || "complaint",
+      priority: report.type === "safety" ? "high" : "medium",
+      reporter: req.user._id,
+      reporterRole: req.user.role === "provider" ? "provider" : "customer",
+      booking: report.booking || null,
+      reportedUser: report.reportedUser || null,
+      source: "report",
+      messages,
+    });
+    report.supportTicket = ticket._id;
+    await report.save();
+    try {
+      broadcast("admin_ticket_created", {
+        ticketId: ticket._id.toString(),
+        ticketNumber: ticket.ticketNumber,
+        status: ticket.status,
+      });
+    } catch (e) { /* socket optional */ }
+  } catch (e) {
+    // The report itself is saved; a failed mirror must not fail the user.
+    console.error("Report → ticket mirror failed:", e?.message || e);
+  }
+};
 
 const photoFromFile = async (file) => {
   if (!file) return undefined;
@@ -90,6 +154,8 @@ export const createIssueReport = catchAsync(async (req, res) => {
       : "general",
     photo: await photoFromFile(req.file),
   });
+
+  await mirrorReportToTicket(report, req);
 
   sendResponse(res, {
     statusCode: httpStatus.CREATED,

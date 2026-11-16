@@ -14,9 +14,18 @@ const ticketMessageSchema = new mongoose.Schema(
     },
     text: {
       type: String,
-      required: true,
       trim: true,
       maxlength: 2000,
+      default: "",
+    },
+    // File attachment (image or PDF) sent with the message — REST upload
+    // to Cloudinary, same shape as the booking chat attachments.
+    attachment: {
+      url: { type: String, default: "" },
+      type: { type: String, enum: ["image", "file", ""], default: "" },
+      name: { type: String, default: "" },
+      mimeType: { type: String, default: "" },
+      size: { type: Number, default: 0 },
     },
   },
   { timestamps: { createdAt: true, updatedAt: false } }
@@ -94,6 +103,35 @@ const supportTicketSchema = new mongoose.Schema(
     resolvedAt: {
       type: Date,
       default: null,
+    },
+    // Where the ticket came from: the app, an admin, or a booking
+    // "Report an Issue" submission (which now lands here as a ticket).
+    source: {
+      type: String,
+      enum: ["app", "admin", "report"],
+      default: "app",
+    },
+    // Money outcome decided when a dispute/refund ticket is resolved
+    // from the admin panel (Section E of the Support build document).
+    resolutionOutcome: {
+      type: {
+        type: String,
+        enum: ["refund_full", "refund_partial", "release_provider", "split", "no_action", null],
+        default: null,
+      },
+      amount: { type: Number, default: 0 },
+      refund: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Refund",
+        default: null,
+      },
+      decidedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        default: null,
+      },
+      decidedAt: { type: Date, default: null },
+      note: { type: String, trim: true, default: "" },
     },
     messages: [ticketMessageSchema],
   },

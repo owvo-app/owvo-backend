@@ -971,7 +971,9 @@ export const cancelBooking = catchAsync(async (req, res) => {
     if (Date.now() > startMs - LATER_FREE_CANCEL_MIN * 60000) {
       throw new AppError(
         httpStatus.BAD_REQUEST,
-        "This booking starts in less than an hour and can no longer be cancelled in the app. Please contact support."
+        Date.now() >= startMs
+          ? "This booking can no longer be cancelled in the app because its scheduled time has passed. Please contact support."
+          : "This booking starts in less than an hour and can no longer be cancelled in the app. Please contact support."
       );
     }
   }

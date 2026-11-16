@@ -49,7 +49,7 @@ const refundSchema = new mongoose.Schema(
     customerMessage: { type: String, trim: true, default: "" },
     source: {
       type: String,
-      enum: ["admin", "customer_request"],
+      enum: ["admin", "customer_request", "dispute"],
       default: "admin",
     },
     ticket: {

@@ -4,6 +4,10 @@ import {
   getAdminTicketById,
   updateAdminTicket,
   adminReplyToTicket,
+  createAdminTicket,
+  getTicketAssignees,
+  getAdminUserBookings,
+  resolveTicketOutcome,
 } from "../controller/ticket.controller.js";
 
 import {
@@ -121,7 +125,7 @@ import {
   updateStaffAccount,
   updateUserAccountStatus,
 } from "../controller/admin.controller.js";
-import { protect, isAdmin, isDashboardUser, hasDashboardMenu } from "../middleware/auth.middleware.js";
+import { protect, isAdmin, isDashboardUser, hasDashboardMenu, hasDashboardMenuAny } from "../middleware/auth.middleware.js";
 import {
   getAnalyticsOverview,
   getAnalyticsTrend,
@@ -141,6 +145,7 @@ import {
   exportAnalyticsTab,
 } from "../controller/analytics.controller.js";
 import { uploadVideo } from "../middleware/uploadVideo.middleware.js";
+import { upload } from "../middleware/upload.middleware.js";
 import {
   getAdminDataRequests,
   updateAdminDataRequest,
@@ -181,10 +186,15 @@ router.post("/bookings/:id/refund", protect, isAdmin, refundAdminBooking);
 router.post("/bookings/:id/notify", protect, hasDashboardMenu("bookings"), sendAdminBookingNotification);
 
 router.get("/reports", protect, hasDashboardMenu("reports"), getAdminReports);
-router.get("/tickets", protect, hasDashboardMenu("reports"), getAdminTickets);
-router.get("/tickets/:id", protect, hasDashboardMenu("reports"), getAdminTicketById);
-router.patch("/tickets/:id", protect, hasDashboardMenu("reports"), updateAdminTicket);
-router.post("/tickets/:id/messages", protect, hasDashboardMenu("reports"), adminReplyToTicket);
+const ticketGuard = [protect, hasDashboardMenuAny(["support", "reports"])];
+router.get("/tickets", ...ticketGuard, getAdminTickets);
+router.post("/tickets", ...ticketGuard, createAdminTicket);
+router.get("/tickets/assignees", ...ticketGuard, getTicketAssignees);
+router.get("/tickets/user-bookings", ...ticketGuard, getAdminUserBookings);
+router.get("/tickets/:id", ...ticketGuard, getAdminTicketById);
+router.patch("/tickets/:id", ...ticketGuard, updateAdminTicket);
+router.post("/tickets/:id/messages", ...ticketGuard, upload.single("document"), adminReplyToTicket);
+router.post("/tickets/:id/outcome", ...ticketGuard, resolveTicketOutcome);
 
 router.post("/opportunities", protect, hasDashboardMenu("washers"), createOpportunity);
 router.get("/opportunities", protect, hasDashboardMenu("washers"), getAdminOpportunities);

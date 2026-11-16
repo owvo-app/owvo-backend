@@ -57,6 +57,12 @@ const issueReportSchema = new mongoose.Schema(
       ref: "User",
       default: null,
     },
+    // The SupportTicket this report was mirrored into (one-queue model).
+    supportTicket: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "SupportTicket",
+      default: null,
+    },
   },
   { timestamps: true }
 );

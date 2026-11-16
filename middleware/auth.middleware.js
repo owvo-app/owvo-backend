@@ -97,6 +97,28 @@ export const hasDashboardMenu = (menuKey) =>
     next();
   })
 
+/** Same as hasDashboardMenu, but any one of the given keys grants access.
+ *  Used where a module was renamed (tickets moved from the "reports" key
+ *  to their own "support" key) so existing staff keep their access. */
+export const hasDashboardMenuAny = (menuKeys) =>
+  catchAsync(async (req, res, next) => {
+    if (req.user?.role === "admin") {
+      next();
+      return;
+    }
+
+    if (req.user?.role !== "staff") {
+      throw new AppError(403, "Access denied. Dashboard access only.");
+    }
+
+    const menus = req.user?.staffPermissions?.menus || [];
+    if (!menuKeys.some((k) => menus.includes(k))) {
+      throw new AppError(403, "Access denied for this dashboard section.");
+    }
+
+    next();
+  })
+
 export const isProvider =catchAsync(async (req, res, next) => {
   if (req.user?.role !== "provider") {
     throw new AppError(403,"Access denied. You are not a provider.");
