@@ -19,6 +19,7 @@ import {
   getUnpaidBookingEarnings,
   syncBookingRefundSummary,
 } from "../utils/money.util.js";
+import { sendTestAdminAlertEmail } from "../utils/adminAlert.util.js";
 import { attemptPayoutTransfer } from "../utils/payout.util.js";
 import { Refund } from "../model/refund.model.js";
 import { EarningAdjustment } from "../model/earningAdjustment.model.js";
@@ -3590,6 +3591,34 @@ export const sendCustomerResetPassword = catchAsync(async (req, res) => {
   });
 });
 
+export const sendSettingsTestAlertEmail = catchAsync(async (req, res) => {
+  let result;
+  try {
+    result = await sendTestAdminAlertEmail();
+  } catch (error) {
+    throw new AppError(
+      httpStatus.BAD_GATEWAY,
+      "The test email could not be sent. Please check the mail settings on the server."
+    );
+  }
+  if (!result.sent) {
+    throw new AppError(httpStatus.BAD_REQUEST, result.reason || "The test email could not be sent.");
+  }
+  await recordActivity({
+    req,
+    action: "settings.test_alert_email_sent",
+    entityType: "platform_settings",
+    entityId: req.user._id,
+    metadata: { to: result.to },
+  });
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: `Test email sent to ${result.to}.`,
+    data: { to: result.to },
+  });
+});
+
 export const getAdminServicesPricing = catchAsync(async (req, res) => {
   const [catalogServices, settings] = await Promise.all([
     ensureDefaultServices(),
@@ -5369,6 +5398,9 @@ export const getAdminNotifications = catchAsync(async (req, res) => {
 
 export const getDashboardSettings = catchAsync(async (req, res) => {
   const settings = await getPlatformSettingsDoc();
+  // Show who last changed the settings (dashboard accounts keep their
+  // name in `name`, app accounts in `fullName` — select both).
+  await settings.populate("updatedBy", "_id name fullName email role");
 
   sendResponse(res, {
     statusCode: httpStatus.OK,
@@ -5390,6 +5422,10 @@ export const updateDashboardSettings = catchAsync(async (req, res) => {
     stripeDashboardUrl,
     stripeAccountId,
     stripePayoutsEnabled,
+    alertOnNewTicket,
+    alertOnDataRequest,
+    alertOnPayoutFailed,
+    adminAlertEmail,
   } = req.body || {};
   let shouldSyncDailyWashLimit = false;
   let syncedDailyLimitProviders = 0;
@@ -5430,6 +5466,22 @@ export const updateDashboardSettings = catchAsync(async (req, res) => {
   }
   if (stripePayoutsEnabled !== undefined) {
     settings.stripePayoutsEnabled = Boolean(stripePayoutsEnabled);
+  }
+  if (alertOnNewTicket !== undefined) {
+    settings.alertOnNewTicket = Boolean(alertOnNewTicket);
+  }
+  if (alertOnDataRequest !== undefined) {
+    settings.alertOnDataRequest = Boolean(alertOnDataRequest);
+  }
+  if (alertOnPayoutFailed !== undefined) {
+    settings.alertOnPayoutFailed = Boolean(alertOnPayoutFailed);
+  }
+  if (adminAlertEmail !== undefined) {
+    const nextAlertEmail = adminAlertEmail.toString().trim();
+    if (nextAlertEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(nextAlertEmail)) {
+      throw new AppError(httpStatus.BAD_REQUEST, "Admin alert email is not a valid email address");
+    }
+    settings.adminAlertEmail = nextAlertEmail;
   }
   settings.updatedBy = req.user._id;
   await settings.save();

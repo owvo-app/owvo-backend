@@ -52,6 +52,24 @@ const platformSettingSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    // Admin email alerts (Settings > Support & Notification Alerts).
+    alertOnNewTicket: {
+      type: Boolean,
+      default: true,
+    },
+    alertOnDataRequest: {
+      type: Boolean,
+      default: true,
+    },
+    alertOnPayoutFailed: {
+      type: Boolean,
+      default: true,
+    },
+    adminAlertEmail: {
+      type: String,
+      default: "",
+      trim: true,
+    },
     updatedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",

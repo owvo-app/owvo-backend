@@ -385,11 +385,34 @@ export const changePassword = catchAsync(async (req, res) => {
       "Old password and new password cannot be same"
     );
   }
-  const user = await User.findById({ _id: req.user?._id });
+  if (newPassword.toString().length < 6) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "New password must be at least 6 characters"
+    );
+  }
+
+  // The password field is select:false — load it explicitly, the same
+  // way the login flow does.
+  const user = await User.findById({ _id: req.user?._id }).select("+password");
 
   if (!user) {
     throw new AppError(httpStatus.NOT_FOUND, "User not found");
   }
+
+  // SECURITY: the current password must be proven before a new one is
+  // set. Without this check, anyone holding a logged-in session could
+  // take over the account without knowing the password.
+  const matched = user.password
+    ? await User.isPasswordMatched(oldPassword, user.password)
+    : false;
+  if (!matched) {
+    throw new AppError(
+      httpStatus.UNAUTHORIZED,
+      "Current password is incorrect"
+    );
+  }
+
   user.password = newPassword;
   await user.save();
   sendResponse(res, {

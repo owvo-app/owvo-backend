@@ -68,6 +68,7 @@ import {
   getDashboardOverview,
   getDashboardRevenue,
   getDashboardSettings,
+  sendSettingsTestAlertEmail,
   getAllCustomers,
   getAdminCustomerDetail,
   createAdminCustomer,
@@ -125,6 +126,7 @@ import {
   updateStaffAccount,
   updateUserAccountStatus,
 } from "../controller/admin.controller.js";
+import { getActivityLogsPaged } from "../controller/systemLog.controller.js";
 import { getAdminNotificationsFeed } from "../controller/notificationFeed.controller.js";
 import { protect, isAdmin, isDashboardUser, hasDashboardMenu, hasDashboardMenuAny } from "../middleware/auth.middleware.js";
 import {
@@ -268,6 +270,7 @@ router.post("/commission-withdrawals", protect, isAdmin, createAdminCommissionWi
 router.get("/notifications", protect, hasDashboardMenu("notifications"), getAdminNotificationsFeed);
 router.get("/settings", protect, hasDashboardMenu("settings"), getDashboardSettings);
 router.patch("/settings", protect, isAdmin, updateDashboardSettings);
+router.post("/settings/test-alert-email", protect, isAdmin, sendSettingsTestAlertEmail);
 
 router.get("/staff", protect, isAdmin, getStaffAccounts);
 router.post("/staff", protect, isAdmin, createStaffAccount);
@@ -275,7 +278,7 @@ router.patch("/staff/:staffId", protect, isAdmin, updateStaffAccount);
 router.patch("/staff/:staffId/disable", protect, isAdmin, disableStaffAccount);
 router.delete("/staff/:staffId", protect, isAdmin, deleteStaffAccount);
 
-router.get("/activity-logs", protect, hasDashboardMenu("system-logs"), getActivityLogs);
+router.get("/activity-logs", protect, hasDashboardMenu("system-logs"), getActivityLogsPaged);
 router.get("/data-requests", protect, hasDashboardMenu("data-requests"), getAdminDataRequests);
 router.patch("/data-requests/:requestId", protect, isAdmin, updateAdminDataRequest);
 router.get("/data-requests/:requestId/export", protect, isAdmin, downloadAdminDataRequestExport);

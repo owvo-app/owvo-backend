@@ -13,6 +13,7 @@ import {
   applyEarningReversal,
   syncBookingRefundSummary,
 } from "../utils/money.util.js";
+import { sendAdminAlert } from "../utils/adminAlert.util.js";
 
 const getStripe = () =>
   new Stripe(process.env.STRIPE_SECRET_KEY, {
@@ -403,6 +404,14 @@ const syncConnectPayout = async (event) => {
     });
   }
   await payout.save();
+  if (event.type !== "payout.paid") {
+    // Admin email alert (Settings > Notification Alerts) — fire-and-forget.
+    sendAdminAlert(
+      "payout_failed",
+      "A provider payout has failed",
+      `A payout of £${amount.toFixed(2)} to a provider's bank account failed: ${payout.failureReason || "Stripe payout failed"}.\n\nOpen the admin panel (Payments & Refunds) to retry it.`
+    );
+  }
   notifyUser(payout.provider.toString(), {
     title: event.type === "payout.paid" ? "Payout sent! 💸" : "Payout failed",
     body:

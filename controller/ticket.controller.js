@@ -8,6 +8,7 @@ import { Refund } from "../model/refund.model.js";
 import { paymentInfo } from "../model/payment.model.js";
 import { emitToUser, broadcast } from "../socket/socket.js";
 import { notifyUser } from "../utils/fcm.util.js";
+import { sendAdminAlert } from "../utils/adminAlert.util.js";
 import { uploadOnCloudinary } from "../utils/common.Method.js";
 import { asMoney } from "../utils/money.util.js";
 import { recordActivity } from "../utils/activityLog.util.js";
@@ -100,6 +101,14 @@ export const createTicket = catchAsync(async (req, res) => {
 
   await ticket.populate(ticketPopulate);
   broadcastTicket("admin_ticket_created", ticket);
+
+  // Admin email alert (Settings > Notification Alerts) — fire-and-forget,
+  // it never delays or fails the ticket creation.
+  sendAdminAlert(
+    "ticket",
+    `New support ticket #${ticket.ticketNumber || ""} — ${ticket.subject || "Ticket"}`,
+    `A new ${ticket.type || "support"} ticket was opened in the OWVO app.\n\nSubject: ${ticket.subject || "-"}\nPriority: ${ticket.priority || "medium"}\n\nOpen the admin panel (Support & Disputes) to respond.`
+  );
 
   res.status(httpStatus.CREATED).json({ success: true, data: ticket });
 });

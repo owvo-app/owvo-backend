@@ -20,6 +20,7 @@ import sendResponse from "../utils/sendResponse.js";
 import { broadcast, emitToUser } from "../socket/socket.js";
 import { recordActivity } from "../utils/activityLog.util.js";
 import { notifyUser } from "../utils/fcm.util.js";
+import { sendAdminAlert } from "../utils/adminAlert.util.js";
 import { computeProviderBalances } from "../utils/money.util.js";
 
 const UPLOADS_ROOT = path.resolve(process.cwd(), "uploads");
@@ -260,6 +261,13 @@ export const createDataRequest = catchAsync(async (req, res) => {
     exportData,
     exportGeneratedAt: new Date(),
   });
+
+  // Admin email alert (Settings > Notification Alerts) — fire-and-forget.
+  sendAdminAlert(
+    "data_request",
+    "New data request waiting for review",
+    `A ${req.user.role === "provider" ? "provider" : "customer"} has asked for a copy of their OWVO data. UK GDPR: it must be answered within 30 days.\n\nOpen the admin panel (Data Requests) to review it.`
+  );
 
   // Tell the admin panel a new GDPR request has arrived (the page also
   // shows a pending-count badge in the sidebar).
