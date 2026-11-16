@@ -6,6 +6,8 @@ import AppError from "../errors/AppError.js";
 import { Booking } from "../model/booking.model.js";
 import { ChatMessage } from "../model/chatMessage.model.js";
 import { DataRequest } from "../model/dataRequest.model.js";
+import { Payout } from "../model/payout.model.js";
+import { Wallet } from "../model/wallet.model.js";
 import { IssueReport } from "../model/issueReport.model.js";
 import { paymentInfo } from "../model/payment.model.js";
 import { Rating } from "../model/rating.model.js";
@@ -15,7 +17,10 @@ import { UserRating } from "../model/userRating.model.js";
 import { Vehicle } from "../model/vehicle.model.js";
 import catchAsync from "../utils/catch.Async.js";
 import sendResponse from "../utils/sendResponse.js";
-import { emitToUser } from "../socket/socket.js";
+import { broadcast, emitToUser } from "../socket/socket.js";
+import { recordActivity } from "../utils/activityLog.util.js";
+import { notifyUser } from "../utils/fcm.util.js";
+import { computeProviderBalances } from "../utils/money.util.js";
 
 const UPLOADS_ROOT = path.resolve(process.cwd(), "uploads");
 const DATA_EXPORT_SNAPSHOT_VERSION = "2026-07-13-readable-v1";
@@ -31,6 +36,24 @@ const compactRequest = (request) => {
     data.exportData = null;
   }
   return data;
+};
+
+// Dashboard accounts store their name in `name`; app users in `fullName`.
+// Always select both so the admin panel can show a real name.
+const adminUserSelect = "_id name fullName email role phoneNumber photo accountStatus";
+const adminReviewerSelect = "_id name fullName email role";
+
+const DUE_MS = 30 * 24 * 60 * 60 * 1000;
+
+// Rows created before due dates existed get a computed one (createdAt + 30d)
+// for display, without rewriting the stored document.
+const withComputedDueAt = (doc) => {
+  if (!doc) return doc;
+  const obj = doc.toObject ? doc.toObject() : { ...doc };
+  if (!obj.dueAt && obj.createdAt) {
+    obj.dueAt = new Date(new Date(obj.createdAt).getTime() + DUE_MS);
+  }
+  return obj;
 };
 
 const removeLocalUpload = (storedUrl = "") => {
@@ -232,10 +255,23 @@ export const createDataRequest = catchAsync(async (req, res) => {
   const request = await DataRequest.create({
     user: req.user._id,
     requesterRole: req.user.role,
+    requestType: "export",
     requestNote: req.body?.requestNote?.toString().trim() || "",
     exportData,
     exportGeneratedAt: new Date(),
   });
+
+  // Tell the admin panel a new GDPR request has arrived (the page also
+  // shows a pending-count badge in the sidebar).
+  try {
+    broadcast("admin_data_request_created", {
+      requestId: request._id.toString(),
+      status: request.status,
+      requesterRole: request.requesterRole,
+    });
+  } catch {
+    // Socket is best-effort; the request itself is already saved.
+  }
 
   sendResponse(res, {
     statusCode: httpStatus.CREATED,
@@ -262,28 +298,84 @@ export const getMyDataRequests = catchAsync(async (req, res) => {
 });
 
 export const getAdminDataRequests = catchAsync(async (req, res) => {
-  const status = req.query.status?.toString();
-  const filter = ["pending", "approved", "rejected"].includes(status)
-    ? { status }
-    : {};
+  const statusParam = req.query.status?.toString();
+  const status = ["pending", "approved", "rejected"].includes(statusParam)
+    ? statusParam
+    : null;
+  const search = req.query.search?.toString().trim() || "";
+  const page = Math.max(1, Number.parseInt(req.query.page?.toString() || "1", 10) || 1);
+  const limit = Math.min(
+    100,
+    Math.max(1, Number.parseInt(req.query.limit?.toString() || "20", 10) || 20)
+  );
 
-  const requests = await DataRequest.find(filter)
+  const filter = {};
+  if (search) {
+    const rx = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    const matchedUsers = await User.find({
+      $or: [{ name: rx }, { fullName: rx }, { email: rx }],
+    }).select("_id");
+    const or = [{ user: { $in: matchedUsers.map((u) => u._id) } }];
+    if (mongoose.Types.ObjectId.isValid(search)) {
+      or.push({ _id: search });
+    }
+    filter.$or = or;
+  }
+
+  const now = new Date();
+  const overdueFilter = {
+    status: "pending",
+    $or: [
+      { dueAt: { $lt: now } },
+      { dueAt: null, createdAt: { $lt: new Date(now.getTime() - DUE_MS) } },
+    ],
+  };
+  // If a search is active the base filter already carries an $or, so the
+  // overdue conditions must be combined with $and instead of overwriting it.
+  const overdueCountFilter = filter.$or
+    ? { $and: [filter, overdueFilter] }
+    : { ...filter, ...overdueFilter };
+  const [totalAll, pendingCount, approvedCount, rejectedCount, overdueCount] =
+    await Promise.all([
+      DataRequest.countDocuments(filter),
+      DataRequest.countDocuments({ ...filter, status: "pending" }),
+      DataRequest.countDocuments({ ...filter, status: "approved" }),
+      DataRequest.countDocuments({ ...filter, status: "rejected" }),
+      DataRequest.countDocuments(overdueCountFilter),
+    ]);
+
+  const listFilter = status ? { ...filter, status } : filter;
+  const total = await DataRequest.countDocuments(listFilter);
+  const requests = await DataRequest.find(listFilter)
     .sort({ createdAt: -1 })
-    .limit(200);
+    .skip((page - 1) * limit)
+    .limit(limit);
   const repairedRequests = await Promise.all(
     requests.map(ensureReadableExportSnapshot)
   );
   await DataRequest.populate(repairedRequests, [
-    { path: "user", select: "_id name email role phoneNumber photo accountStatus" },
-    { path: "reviewedBy", select: "_id name email role" },
+    { path: "user", select: adminUserSelect },
+    { path: "reviewedBy", select: adminReviewerSelect },
   ]);
-  const data = repairedRequests.map((request) => request.toObject());
+  const items = repairedRequests.map((request) => withComputedDueAt(request));
 
   sendResponse(res, {
     statusCode: httpStatus.OK,
     success: true,
     message: "Data requests fetched successfully.",
-    data,
+    data: {
+      items,
+      total,
+      page,
+      limit,
+      statusCounts: {
+        total: totalAll,
+        pending: pendingCount,
+        approved: approvedCount,
+        rejected: rejectedCount,
+        overdue: overdueCount,
+      },
+    },
   });
 });
 
@@ -302,6 +394,13 @@ export const updateAdminDataRequest = catchAsync(async (req, res) => {
   const request = await DataRequest.findById(requestId);
   if (!request) {
     throw new AppError(httpStatus.NOT_FOUND, "Data request not found.");
+  }
+
+  if (request.requestType === "deletion") {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "This is a record of a completed account deletion and cannot be reviewed."
+    );
   }
 
   request.status = status;
@@ -332,17 +431,100 @@ export const updateAdminDataRequest = catchAsync(async (req, res) => {
         : "Your OWVO data request has been rejected.",
   });
 
+  // Push + a saved notification, so the user hears about the decision
+  // even when the app is closed (the socket emit above only reaches an
+  // open app).
+  await notifyUser(request.user, {
+    title:
+      status === "approved"
+        ? "Your data request was approved"
+        : "Your data request was rejected",
+    body:
+      status === "approved"
+        ? "You can now view and copy your OWVO data export in the app under Help > Privacy & Account Help."
+        : "Your OWVO data request was rejected. Please contact support if you need more information.",
+    data: {
+      type: "data_request",
+      requestId: request._id.toString(),
+      status: request.status,
+    },
+  });
+
+  try {
+    broadcast("admin_data_request_updated", {
+      requestId: request._id.toString(),
+      status: request.status,
+    });
+  } catch {
+    // Socket is best-effort.
+  }
+
+  await recordActivity({
+    req,
+    action:
+      status === "approved" ? "data_request.approved" : "data_request.rejected",
+    entityType: "DataRequest",
+    entityId: request._id,
+    metadata: {
+      requesterRole: request.requesterRole,
+      requestType: request.requestType || "export",
+    },
+  });
+
   const populated = await DataRequest.findById(request._id)
-    .populate("user", "_id name email role phoneNumber photo accountStatus")
-    .populate("reviewedBy", "_id name email role")
+    .populate("user", adminUserSelect)
+    .populate("reviewedBy", adminReviewerSelect)
     .lean();
 
   sendResponse(res, {
     statusCode: httpStatus.OK,
     success: true,
     message: "Data request updated successfully.",
-    data: populated,
+    data: withComputedDueAt(populated),
   });
+});
+
+export const downloadAdminDataRequestExport = catchAsync(async (req, res) => {
+  const { requestId } = req.params;
+
+  if (!mongoose.Types.ObjectId.isValid(requestId)) {
+    throw new AppError(httpStatus.BAD_REQUEST, "Invalid data request id.");
+  }
+
+  const request = await DataRequest.findById(requestId);
+  if (!request) {
+    throw new AppError(httpStatus.NOT_FOUND, "Data request not found.");
+  }
+
+  if (request.requestType === "deletion") {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "Deletion records do not have an export file."
+    );
+  }
+
+  if (request.status !== "approved" || !request.exportData) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "Approve the request before downloading its export."
+    );
+  }
+
+  await recordActivity({
+    req,
+    action: "data_request.export_downloaded",
+    entityType: "DataRequest",
+    entityId: request._id,
+    metadata: { requesterRole: request.requesterRole },
+  });
+
+  const filename = `owvo-data-export-${request._id
+    .toString()
+    .slice(-6)
+    .toUpperCase()}.json`;
+  res.setHeader("Content-Type", "application/json");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  res.status(httpStatus.OK).send(JSON.stringify(request.exportData, null, 2));
 });
 
 export const deleteMyAccount = catchAsync(async (req, res) => {
@@ -363,7 +545,76 @@ export const deleteMyAccount = catchAsync(async (req, res) => {
     throw new AppError(httpStatus.NOT_FOUND, "User not found.");
   }
 
+  // Deletion guards (standard-app behaviour): money or a live booking
+  // must be settled first, otherwise records and payouts get stranded.
+  const activeBooking = await Booking.findOne({
+    $or: [{ user: user._id }, { provider: user._id }],
+    status: { $in: ["pending", "accepted", "arrived", "ongoing"] },
+  }).select("_id");
+  if (activeBooking) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "You have an active booking. Please complete or cancel it before deleting your account."
+    );
+  }
+
+  if (user.role === "user") {
+    const wallet = await Wallet.findOne({ user: user._id }).select("balance");
+    if (wallet && Number(wallet.balance) > 0) {
+      throw new AppError(
+        httpStatus.BAD_REQUEST,
+        `You still have £${Number(wallet.balance).toFixed(2)} in your OWVO wallet. Please use it or contact support before deleting your account.`
+      );
+    }
+  }
+
+  if (user.role === "provider") {
+    const balances = await computeProviderBalances(user._id);
+    if (balances && Number(balances.available) > 0) {
+      throw new AppError(
+        httpStatus.BAD_REQUEST,
+        `You have £${Number(balances.available).toFixed(2)} of earnings waiting to be paid out. Please cash out or contact support before deleting your account.`
+      );
+    }
+    const openPayout = await Payout.findOne({
+      provider: user._id,
+      status: { $in: ["pending", "processing"] },
+    }).select("_id");
+    if (openPayout) {
+      throw new AppError(
+        httpStatus.BAD_REQUEST,
+        "A payout is still in progress for your account. Please wait for it to finish before deleting your account."
+      );
+    }
+  }
+
   removeUserLocalUploads(user);
+
+  // Best-effort: also remove the user's files from Cloudinary (the local
+  // cleanup above only covers files stored under /uploads). A failure
+  // here never blocks the deletion.
+  try {
+    const publicIds = [
+      user?.photo?.public_id,
+      user?.identityVerification?.idFile?.public_id,
+      user?.identityVerification?.passportOrDrivingLicenseFile?.public_id,
+      user?.insurance?.document?.public_id,
+      user?.publicLiabilityInsurance?.document?.public_id,
+      user?.drivewayPhoto?.document?.public_id,
+    ].filter((v) => typeof v === "string" && v.trim());
+    if (publicIds.length) {
+      const { v2: cloudinary } = await import("cloudinary");
+      for (const publicId of publicIds) {
+        try {
+          await cloudinary.uploader.destroy(publicId);
+        } catch {
+          // Ignore — the file may already be gone.
+        }
+      }
+    }
+  } catch {
+    // Cloudinary cleanup is best-effort only.
+  }
 
   const id = user._id;
   const suffix = `${id.toString().slice(-8)}-${Date.now()}`;
@@ -415,6 +666,9 @@ export const deleteMyAccount = catchAsync(async (req, res) => {
   ]);
 
   user.name = "Deleted account";
+  // App users carry their real name in `fullName` — without this line the
+  // anonymised account would keep showing the person's real name.
+  user.fullName = "Deleted account";
   user.email = `deleted-${suffix}@deleted.owvo.local`;
   user.password = `deleted-${suffix}`;
   user.refreshToken = "";
@@ -454,6 +708,40 @@ export const deleteMyAccount = catchAsync(async (req, res) => {
   user.isBusy = false;
 
   await user.save();
+
+  // The person's old data-request export snapshots hold a full copy of
+  // their data — wipe the contents (the request records themselves stay
+  // for the admin audit trail, without the personal data inside).
+  await DataRequest.updateMany(
+    { user: id },
+    { $set: { exportData: null, exportGeneratedAt: null, requestNote: "" } }
+  );
+
+  // Leave a record the admin can see on the Data Requests page: who
+  // deleted their account, and when. It is a record, not a request, so
+  // it cannot be approved or rejected.
+  await DataRequest.create({
+    user: id,
+    requesterRole: user.role === "provider" ? "provider" : "user",
+    requestType: "deletion",
+    status: "approved",
+    requestNote: "",
+    adminNote: "Self-service account deletion completed in the app.",
+    reviewedAt: new Date(),
+    dueAt: new Date(),
+  });
+
+  try {
+    await recordActivity({
+      req,
+      action: "account.self_deleted",
+      entityType: "User",
+      entityId: id,
+      metadata: { role: user.role },
+    });
+  } catch {
+    // Logging must never block a deletion that already succeeded.
+  }
 
   sendResponse(res, {
     statusCode: httpStatus.OK,

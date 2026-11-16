@@ -147,6 +147,7 @@ import {
 import { uploadVideo } from "../middleware/uploadVideo.middleware.js";
 import { upload } from "../middleware/upload.middleware.js";
 import {
+  downloadAdminDataRequestExport,
   getAdminDataRequests,
   updateAdminDataRequest,
 } from "../controller/dataRequest.controller.js";
@@ -276,6 +277,7 @@ router.delete("/staff/:staffId", protect, isAdmin, deleteStaffAccount);
 router.get("/activity-logs", protect, hasDashboardMenu("system-logs"), getActivityLogs);
 router.get("/data-requests", protect, hasDashboardMenu("data-requests"), getAdminDataRequests);
 router.patch("/data-requests/:requestId", protect, isAdmin, updateAdminDataRequest);
+router.get("/data-requests/:requestId/export", protect, isAdmin, downloadAdminDataRequestExport);
 
 router.get("/provider-verifications", protect, hasDashboardMenu("provider-verification"), getProviderVerificationQueue);
 router.patch("/providers/:providerId/verification", protect, isAdmin, updateProviderVerification);
