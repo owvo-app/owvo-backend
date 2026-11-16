@@ -472,6 +472,9 @@ export const createBooking = catchAsync(async (req, res) => {
     data: {
       type: "new_booking_request",
       bookingId: booking._id.toString(),
+      // Now wali darkhwast par client wali job alert awaz (loop wala
+      // Uber-style alert); Later wali par aam default awaz hi jati hai.
+      jobAlert: isLater ? "" : "1",
     },
   });
 

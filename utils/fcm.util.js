@@ -100,9 +100,24 @@ export const sendPushToUser = async (
       data: stringData,
       android: {
         priority: "high",
-        notification: { channelId: "owvo_bookings", sound: "default" },
+        notification:
+          stringData.type === "new_booking_request" &&
+          stringData.jobAlert === "1"
+            ? { channelId: "owvo_job_alerts", sound: "job_alert" }
+            : { channelId: "owvo_bookings", sound: "default" },
       },
-      apns: { payload: { aps: { sound: "default", badge: 1 } } },
+      apns: {
+        payload: {
+          aps: {
+            sound:
+              stringData.type === "new_booking_request" &&
+              stringData.jobAlert === "1"
+                ? "job_alert.caf"
+                : "default",
+            badge: 1,
+          },
+        },
+      },
     });
 
     const badTokens = [];
