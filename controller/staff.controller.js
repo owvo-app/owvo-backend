@@ -86,7 +86,13 @@ export const getStaffAccountsV2 = catchAsync(async (req, res) => {
   const department = req.query.department?.toString().trim() || "";
   const status = req.query.status?.toString().trim() || "";
 
-  const filter = { role: "staff" };
+  // The wizard's "Reporting To" picker also needs the admin accounts:
+  // a staff member most often reports to the Super Admin, who is not a
+  // staff record. Counts and #ST numbering always stay staff-only.
+  const includeAdmins = req.query.includeAdmins?.toString() === "true";
+  const filter = {
+    role: includeAdmins ? { $in: ["staff", "admin"] } : "staff",
+  };
   if (role) filter.staffRole = role;
   if (department) filter.department = department;
   if (status === "active") {
@@ -185,6 +191,9 @@ export const createStaffAccountV2 = catchAsync(async (req, res) => {
   if (password.toString().length < 6) {
     throw new AppError(httpStatus.BAD_REQUEST, "Password must be at least 6 characters");
   }
+  if (phone && !/^\+?[0-9]{7,15}$/.test(phone.toString().replace(/[\s()-]/g, ""))) {
+    throw new AppError(httpStatus.BAD_REQUEST, "Please enter a valid phone number");
+  }
   const roleKey = STAFF_ROLES.some((r) => r.key === staffRole) ? staffRole : "custom";
 
   const normalizedEmail = email.toString().trim().toLowerCase();
@@ -263,6 +272,9 @@ export const updateStaffAccountV2 = catchAsync(async (req, res) => {
   if (name !== undefined) staff.name = name.toString().trim();
   if (phone !== undefined) {
     const nextPhone = phone.toString().trim();
+    if (nextPhone && !/^\+?[0-9]{7,15}$/.test(nextPhone.replace(/[\s()-]/g, ""))) {
+      throw new AppError(httpStatus.BAD_REQUEST, "Please enter a valid phone number");
+    }
     if (nextPhone) staff.phoneNumber = nextPhone;
   }
   if (staffRole !== undefined && STAFF_ROLES.some((r) => r.key === staffRole)) {
