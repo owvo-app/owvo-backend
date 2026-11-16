@@ -242,6 +242,10 @@ export const login = catchAsync(async (req, res) => {
   await user.save();
 
   if (["admin", "staff"].includes(user.role)) {
+    await User.updateOne(
+      { _id: user._id },
+      { $set: { lastLoginAt: new Date() } }
+    );
     await recordActivity({
       req: { ...req, user },
       action: "dashboard.login",

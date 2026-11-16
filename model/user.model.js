@@ -58,6 +58,36 @@ const userSchema = new Schema(
       enum: ["active", "disabled"],
       default: "active",
     },
+    // Staff Management (role-based staff system) — sirf role:"staff"
+    // walay accounts par meaningful hain.
+    staffRole: {
+      type: String,
+      enum: [
+        "operations_manager",
+        "support_agent",
+        "finance_staff",
+        "dispatch_staff",
+        "custom",
+      ],
+      default: "custom",
+    },
+    department: { type: String, trim: true, default: "" },
+    // Staff ka office/base (provider wale GeoJSON location se alag —
+    // ye sirf ek label hai, maslan "HQ London").
+    staffLocation: { type: String, trim: true, default: "" },
+    reportingTo: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+    // Employment status — accountStatus (login band/chaalu) se alag:
+    // on_leave wala staff login kar sakta hai, ye sirf ek label hai.
+    staffStatus: {
+      type: String,
+      enum: ["active", "on_leave"],
+      default: "active",
+    },
+    lastLoginAt: { type: Date, default: null },
     isDeleted: {
       type: Boolean,
       default: false,

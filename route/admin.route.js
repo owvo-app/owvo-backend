@@ -126,6 +126,18 @@ import {
   updateStaffAccount,
   updateUserAccountStatus,
 } from "../controller/admin.controller.js";
+import {
+  createStaffAccountV2,
+  createStaffNote,
+  deleteStaffNote,
+  getStaffAccountsV2,
+  getStaffActivity,
+  getStaffMeta,
+  getStaffNotes,
+  resetStaffPassword,
+  updateStaffAccountV2,
+  uploadStaffPhoto,
+} from "../controller/staff.controller.js";
 import { getActivityLogsPaged } from "../controller/systemLog.controller.js";
 import { getAdminNotificationsFeed } from "../controller/notificationFeed.controller.js";
 import { protect, isAdmin, isDashboardUser, hasDashboardMenu, hasDashboardMenuAny } from "../middleware/auth.middleware.js";
@@ -272,9 +284,16 @@ router.get("/settings", protect, hasDashboardMenu("settings"), getDashboardSetti
 router.patch("/settings", protect, isAdmin, updateDashboardSettings);
 router.post("/settings/test-alert-email", protect, isAdmin, sendSettingsTestAlertEmail);
 
-router.get("/staff", protect, isAdmin, getStaffAccounts);
-router.post("/staff", protect, isAdmin, createStaffAccount);
-router.patch("/staff/:staffId", protect, isAdmin, updateStaffAccount);
+router.get("/staff/meta", protect, isAdmin, getStaffMeta);
+router.get("/staff", protect, isAdmin, getStaffAccountsV2);
+router.post("/staff", protect, isAdmin, createStaffAccountV2);
+router.post("/staff/photo", protect, isAdmin, upload.single("photo"), uploadStaffPhoto);
+router.patch("/staff/:staffId", protect, isAdmin, updateStaffAccountV2);
+router.post("/staff/:staffId/reset-password", protect, isAdmin, resetStaffPassword);
+router.get("/staff/:staffId/activity", protect, isAdmin, getStaffActivity);
+router.get("/staff/:staffId/notes", protect, isAdmin, getStaffNotes);
+router.post("/staff/:staffId/notes", protect, isAdmin, createStaffNote);
+router.delete("/staff/:staffId/notes/:noteId", protect, isAdmin, deleteStaffNote);
 router.patch("/staff/:staffId/disable", protect, isAdmin, disableStaffAccount);
 router.delete("/staff/:staffId", protect, isAdmin, deleteStaffAccount);
 
