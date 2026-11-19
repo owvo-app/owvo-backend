@@ -4,6 +4,7 @@ import { paymentInfo } from "../model/payment.model.js";
 import { User } from "../model/user.model.js";
 import { broadcast, emitToUser } from "../socket/socket.js";
 import { notifyUser } from "../utils/fcm.util.js";
+import { isProviderCovered } from "../utils/serviceArea.util.js";
 import { Payout } from "../model/payout.model.js";
 import { SupportTicket } from "../model/supportTicket.model.js";
 import { Refund } from "../model/refund.model.js";
@@ -461,6 +462,21 @@ export const createPayment = async (req, res) => {
 
     if (paymentType === "booking" && booking.payment?.status === "paid") {
       return sendFailure(res, 409, "Booking is already paid.");
+    }
+
+    // Service Areas: payment se pehle coverage dobara check — area pause
+    // ho chuki ho to paisay nahi lag sakte.
+    if (paymentType === "booking" && booking.provider) {
+      const providerUser = await User.findById(booking.provider).select(
+        "providerAddress serviceLocationAddress"
+      );
+      if (providerUser && !(await isProviderCovered(providerUser))) {
+        return sendFailure(
+          res,
+          403,
+          "Bookings are not open in this provider's area right now, so payment can't be taken."
+        );
+      }
     }
 
     const amountToCharge =

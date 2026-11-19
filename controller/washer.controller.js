@@ -9,6 +9,7 @@ import {
   getUnpaidBookingEarnings,
 } from "../utils/money.util.js";
 import { attemptPayoutTransfer } from "../utils/payout.util.js";
+import { getServiceAreaState, coverageForPostcode, providerPostcodeOf, isProviderCovered } from "../utils/serviceArea.util.js";
 import Stripe from "stripe";
 import { paymentInfo } from "../model/payment.model.js";
 import { Rating } from "../model/rating.model.js";
@@ -412,6 +413,15 @@ export const goOnline = catchAsync(async (req, res) => {
   assertWasherPoliciesAccepted(washer);
   assertWasherAdminApproved(washer);
 
+  // Service Areas: provider booking tabhi accept kar sakta hai jab us ke
+  // wash address ka postcode kisi ACTIVE area me ho.
+  if (status === "accepted" && !(await isProviderCovered(washer))) {
+    throw new AppError(
+      httpStatus.FORBIDDEN,
+      "Bookings aren't open in your area yet. Your wash address postcode is not in an active service area."
+    );
+  }
+
   if (!isProviderAvailableNow(washer)) {
     throw new AppError(
       httpStatus.FORBIDDEN,
@@ -469,6 +479,15 @@ export const acceptBooking = catchAsync(async (req, res) => {
 
   assertWasherPoliciesAccepted(washer);
   assertWasherAdminApproved(washer);
+
+  // Service Areas: provider booking tabhi accept kar sakta hai jab us ke
+  // wash address ka postcode kisi ACTIVE area me ho.
+  if (status === "accepted" && !(await isProviderCovered(washer))) {
+    throw new AppError(
+      httpStatus.FORBIDDEN,
+      "Bookings aren't open in your area yet. Your wash address postcode is not in an active service area."
+    );
+  }
 
   const statusMessages = {
     accepted: "Your booking has been accepted!",
@@ -1683,6 +1702,16 @@ export const getNearbyWashers = catchAsync(async (req, res) => {
       },
     ])
   );
+  // Service Areas: jab areas configure hon to sirf ACTIVE area walay
+  // providers hi bookable nazar aate hain (coverage provider ke approved
+  // wash address ke postcode se check hoti hai).
+  const saState = await getServiceAreaState();
+  if (saState.restricted) {
+    availableWashers = availableWashers.filter((washer) =>
+      coverageForPostcode(saState, providerPostcodeOf(washer)).covered
+    );
+  }
+
   const washersWithServices = availableWashers.map((washer) => {
     const washerData = washer.toObject();
     const providerId = washerData._id.toString();
@@ -1717,6 +1746,12 @@ export const getNearbyWashers = catchAsync(async (req, res) => {
     success: true,
     message: "Nearby washers fetched",
     data: washersWithServices,
+    meta: {
+      serviceAreaRestricted: saState.restricted,
+      searchedAreaActive: req.query.postcode
+        ? coverageForPostcode(saState, req.query.postcode).covered
+        : null,
+    },
   });
 });
 

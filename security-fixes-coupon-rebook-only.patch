@@ -1,0 +1,70 @@
+diff -u -r /tmp/owvo-sec/backend-orig/controller/booking.controller.js /tmp/owvo-sec/backend-fixed/controller/booking.controller.js
+--- /tmp/owvo-sec/backend-orig/controller/booking.controller.js	2026-10-06 09:05:11.845894067 +0000
++++ /tmp/owvo-sec/backend-fixed/controller/booking.controller.js	2026-10-06 09:05:29.636568628 +0000
+@@ -708,7 +708,10 @@
+     throw new AppError(httpStatus.FORBIDDEN, "Access denied");
+   }
+ 
+-  const { bookingDate, address, postalCode, payment, couponCode } = req.body;
++  // SECURITY FIX (2026-10-06): `payment` intentionally NOT taken from req.body.
++  // The client previously dictated the payment object, so bookings could be
++  // marked "paid" without Stripe. Server sets payment like createBooking does.
++  const { bookingDate, address, postalCode, couponCode } = req.body;
+ 
+   const provider = prev.provider;
+   const service = prev.service;
+@@ -734,6 +737,10 @@
+     throw new AppError(httpStatus.BAD_REQUEST, "Washer daily limit completed");
+   }
+ 
++  // NOTE (2026-10-06): the broadcast() call below references undefined
++  // `booking`, `customerPayload`, `servicePayload`, `vehiclePayload`, so this
++  // endpoint currently 500s (dead code). Fix or remove that block before
++  // re-enabling this route in production.
+   broadcast("admin_booking_status_updated", toAdminBookingPayload(booking, {
+     user: customerPayload,
+     service: servicePayload,
+@@ -771,10 +778,9 @@
+ 
+   const finalAddress = address ?? prev.address;
+   const finalBookingDate = bookingDate ?? prev.bookingDate;
+-  const finalPayment = payment ?? prev.payment;
+   const finalPostalCode = (postalCode ?? prev.postalCode)?.toUpperCase().trim();
+ 
+-  if (!finalAddress || !finalBookingDate || !finalPayment || !finalPostalCode) {
++  if (!finalAddress || !finalBookingDate || !finalPostalCode) {
+     throw new AppError(httpStatus.BAD_REQUEST, "Missing required rebook fields");
+   }
+ 
+@@ -825,7 +831,9 @@
+     address: finalAddress,
+     bookingDate: finalBookingDate,
+     postalCode: finalPostalCode,
+-    payment: finalPayment,
++    // SECURITY FIX (2026-10-06): server-set payment — never trust the client.
++    // Matches createBooking. Mark paid only via Stripe webhook after capture.
++    payment: { method: "online", status: "pending" },
+     currency: prev.currency || "GBP",
+     status: "pending",
+   });
+diff -u -r /tmp/owvo-sec/backend-orig/route/coupon.route.js /tmp/owvo-sec/backend-fixed/route/coupon.route.js
+--- /tmp/owvo-sec/backend-orig/route/coupon.route.js	2026-10-06 09:05:11.874382389 +0000
++++ /tmp/owvo-sec/backend-fixed/route/coupon.route.js	2026-10-06 09:05:17.613568162 +0000
+@@ -4,11 +4,15 @@
+   getAllCoupons,
+   applyCoupon,
+ } from "../controller/coupon.controller.js";
++import { protect, isAdminOrStaff } from "../middleware/auth.middleware.js";
+ 
+ const router = express.Router();
+ 
+-router.post("/create", createCoupon);
+-router.get("/", getAllCoupons);
++// SECURITY FIX (2026-10-06): coupon create/list were public — anyone could
++// mint 100%-off coupons. Admin dashboard only now.
++router.post("/create", protect, isAdminOrStaff, createCoupon);
++router.get("/", protect, isAdminOrStaff, getAllCoupons);
++// Customers apply coupons at booking time — stays public.
+ router.post("/apply", applyCoupon);
+ 
+ export default router;

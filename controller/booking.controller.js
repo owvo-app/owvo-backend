@@ -14,6 +14,7 @@ import { User } from "../model/user.model.js";
 import { Vehicle } from "../model/vehicle.model.js";
 import { broadcast, emitToUser } from "../socket/socket.js";
 import { recordActivity } from "../utils/activityLog.util.js";
+import { isProviderCovered } from "../utils/serviceArea.util.js";
 import { notifyUser } from "../utils/fcm.util.js";
 import { isProviderAvailableNow } from "../utils/availability.util.js";
 import {
@@ -104,6 +105,15 @@ export const createBooking = catchAsync(async (req, res) => {
 
   if (!washer || washer.role !== "provider") {
     throw new AppError(httpStatus.NOT_FOUND, "Washer not found");
+  }
+
+  // Service Areas: provider ka wash postcode ACTIVE area me na ho to
+  // booking nahi banti (customer ko saaf wajah milti hai).
+  if (!(await isProviderCovered(washer))) {
+    throw new AppError(
+      httpStatus.FORBIDDEN,
+      "This provider is not taking bookings in their area right now."
+    );
   }
 
   // Later booking: provider ka abhi online/busy hona shart NAHI —
@@ -1042,7 +1052,10 @@ export const rebookBooking = catchAsync(async (req, res) => {
     throw new AppError(httpStatus.FORBIDDEN, "Access denied");
   }
 
-  const { bookingDate, address, postalCode, payment, couponCode } = req.body;
+  // SECURITY FIX (2026-10-06): `payment` intentionally NOT taken from req.body.
+  // The client previously dictated the payment object, so bookings could be
+  // marked "paid" without Stripe. Server sets payment like createBooking does.
+  const { bookingDate, address, postalCode, couponCode } = req.body;
 
   const provider = prev.provider;
   const service = prev.service;
@@ -1068,6 +1081,10 @@ export const rebookBooking = catchAsync(async (req, res) => {
     throw new AppError(httpStatus.BAD_REQUEST, "Washer daily limit completed");
   }
 
+  // NOTE (2026-10-06): the broadcast() call below references undefined
+  // `booking`, `customerPayload`, `servicePayload`, `vehiclePayload`, so this
+  // endpoint currently 500s (dead code). Fix or remove that block before
+  // re-enabling this route in production.
   broadcast("admin_booking_status_updated", toAdminBookingPayload(booking, {
     user: customerPayload,
     service: servicePayload,
@@ -1105,10 +1122,9 @@ export const rebookBooking = catchAsync(async (req, res) => {
 
   const finalAddress = address ?? prev.address;
   const finalBookingDate = bookingDate ?? prev.bookingDate;
-  const finalPayment = payment ?? prev.payment;
   const finalPostalCode = (postalCode ?? prev.postalCode)?.toUpperCase().trim();
 
-  if (!finalAddress || !finalBookingDate || !finalPayment || !finalPostalCode) {
+  if (!finalAddress || !finalBookingDate || !finalPostalCode) {
     throw new AppError(httpStatus.BAD_REQUEST, "Missing required rebook fields");
   }
 
@@ -1160,7 +1176,9 @@ export const rebookBooking = catchAsync(async (req, res) => {
     address: finalAddress,
     bookingDate: finalBookingDate,
     postalCode: finalPostalCode,
-    payment: finalPayment,
+    // SECURITY FIX (2026-10-06): server-set payment — never trust the client.
+    // Matches createBooking. Mark paid only via Stripe webhook after capture.
+    payment: { method: "online", status: "pending" },
     currency: prev.currency || "GBP",
     status: "pending",
   });

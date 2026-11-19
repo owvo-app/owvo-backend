@@ -18,6 +18,7 @@ import {
 } from "../controller/dataRequest.controller.js";
 
 import { protect } from "../middleware/auth.middleware.js";
+import { getServiceAreaCoverage, joinServiceAreaWaitlist, getMyServiceAreaStatus } from "../controller/serviceArea.controller.js";
 import { upload } from "../middleware/upload.middleware.js"; 
 
 const router = express.Router();
@@ -34,6 +35,10 @@ const groupUploadedFilesByField = (req, res, next) => {
   next();
 };
 router.get("/profile", protect, getProfile);
+// Service Areas (app-side): coverage check + notify-me waitlist.
+router.get("/service-areas/coverage", protect, getServiceAreaCoverage);
+router.post("/service-areas/notify-me", protect, joinServiceAreaWaitlist);
+router.get("/service-areas/my-status", protect, getMyServiceAreaStatus);
 router.put(
   "/profile",
   protect,

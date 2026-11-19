@@ -126,6 +126,7 @@ import {
   updateStaffAccount,
   updateUserAccountStatus,
 } from "../controller/admin.controller.js";
+import { getAdminServiceAreas, createAdminServiceArea, updateAdminServiceArea, deleteAdminServiceArea, checkAdminServiceAreaCoverage } from "../controller/serviceArea.controller.js";
 import {
   createStaffAccountV2,
   createStaffNote,
@@ -283,6 +284,13 @@ router.get("/notifications", protect, hasDashboardMenu("notifications"), getAdmi
 router.get("/settings", protect, hasDashboardMenu("settings"), getDashboardSettings);
 router.patch("/settings", protect, isAdmin, updateDashboardSettings);
 router.post("/settings/test-alert-email", protect, isAdmin, sendSettingsTestAlertEmail);
+// Service Areas (Settings tab) — list/check kisi bhi settings-menu wale
+// ke liye; add/edit/activate/delete sirf admin.
+router.get("/service-areas/check", protect, hasDashboardMenu("settings"), checkAdminServiceAreaCoverage);
+router.get("/service-areas", protect, hasDashboardMenu("settings"), getAdminServiceAreas);
+router.post("/service-areas", protect, isAdmin, createAdminServiceArea);
+router.patch("/service-areas/:areaId", protect, isAdmin, updateAdminServiceArea);
+router.delete("/service-areas/:areaId", protect, isAdmin, deleteAdminServiceArea);
 
 router.get("/staff/meta", protect, isAdmin, getStaffMeta);
 router.get("/staff", protect, isAdmin, getStaffAccountsV2);
